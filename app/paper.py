@@ -24,6 +24,9 @@ class PaperTrade:
     closed_at: str | None
     pnl_usd: float | None
     pnl_return: float | None
+    entry_asset: float | None = None
+    target_asset: float | None = None
+    stop_asset: float | None = None
 
 
 class PaperLedger:
@@ -67,10 +70,19 @@ class PaperLedger:
                     close_reason TEXT,
                     closed_at TEXT,
                     pnl_usd DOUBLE PRECISION,
-                    pnl_return DOUBLE PRECISION
+                    pnl_return DOUBLE PRECISION,
+                    entry_asset DOUBLE PRECISION,
+                    target_asset DOUBLE PRECISION,
+                    stop_asset DOUBLE PRECISION
                 )
                 """
             )
+            for sql in (
+                "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS entry_asset DOUBLE PRECISION",
+                "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS target_asset DOUBLE PRECISION",
+                "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS stop_asset DOUBLE PRECISION",
+            ):
+                self.conn.execute(sql)
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_paper_open "
                 "ON paper_trades(market, status)"
@@ -86,10 +98,19 @@ class PaperLedger:
                 side TEXT NOT NULL, capital_usd REAL NOT NULL, pt_amount_raw TEXT NOT NULL,
                 entry_usd REAL NOT NULL, target_usd REAL NOT NULL, stop_usd REAL NOT NULL,
                 status TEXT NOT NULL, close_reason TEXT, closed_at TEXT,
-                pnl_usd REAL, pnl_return REAL
+                pnl_usd REAL, pnl_return REAL,
+                entry_asset REAL, target_asset REAL, stop_asset REAL
             )
             """
         )
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(paper_trades)")}
+        for column, sql in {
+            "entry_asset": "ALTER TABLE paper_trades ADD COLUMN entry_asset REAL",
+            "target_asset": "ALTER TABLE paper_trades ADD COLUMN target_asset REAL",
+            "stop_asset": "ALTER TABLE paper_trades ADD COLUMN stop_asset REAL",
+        }.items():
+            if column not in columns:
+                self.conn.execute(sql)
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_paper_open ON paper_trades(market,status)"
         )
@@ -117,6 +138,9 @@ class PaperLedger:
         entry: float,
         target: float,
         stop: float,
+        entry_asset: float | None = None,
+        target_asset: float | None = None,
+        stop_asset: float | None = None,
     ) -> int:
         values = (
             datetime.now(timezone.utc).isoformat(),
@@ -129,14 +153,17 @@ class PaperLedger:
             target,
             stop,
             "OPEN",
+            entry_asset,
+            target_asset,
+            stop_asset,
         )
         if self.backend == "postgres":
             cur = self.conn.execute(
                 """
                 INSERT INTO paper_trades
                 (opened_at,market,name,side,capital_usd,pt_amount_raw,entry_usd,
-                 target_usd,stop_usd,status)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                 target_usd,stop_usd,status,entry_asset,target_asset,stop_asset)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id
                 """,
                 values,
@@ -147,8 +174,8 @@ class PaperLedger:
                 """
                 INSERT INTO paper_trades
                 (opened_at,market,name,side,capital_usd,pt_amount_raw,entry_usd,
-                 target_usd,stop_usd,status)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
+                 target_usd,stop_usd,status,entry_asset,target_asset,stop_asset)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 values,
             )
@@ -161,7 +188,7 @@ class PaperLedger:
             """
             SELECT id,opened_at,market,name,side,capital_usd,pt_amount_raw,
                    entry_usd,target_usd,stop_usd,status,close_reason,closed_at,
-                   pnl_usd,pnl_return
+                   pnl_usd,pnl_return,entry_asset,target_asset,stop_asset
             FROM paper_trades
             WHERE status='OPEN'
             ORDER BY id

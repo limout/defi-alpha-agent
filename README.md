@@ -55,3 +55,14 @@ Pendle metadata omits decimals, the execution layer resolves the underlying
 ERC-20 `decimals()` with a read-only `eth_call` only when a validated candidate
 needs a real Convert quote. Results are cached for the process lifetime. No
 wallet, signing, approvals, or transactions are involved.
+
+
+## v0.6 methodology
+
+- Historical ingestion keeps the future Pendle universe instead of filtering by liquidity at insert time.
+- PT dislocation is measured in PT/underlying asset terms rather than USD PT.
+- Signals require a cheap PT/underlying price z-score and a same-TTM-bucket high implied-APY z-score.
+- Signals skip markets with less than 21 days or more than 730 days to expiry.
+- Historical returns are evaluated at fixed 1h/4h/12h/24h horizons with conservative costs.
+- Live execution checks only a real BUY Convert quote and an entry price-impact cap; it does not require an immediately profitable round trip.
+- The agent remains read-only/paper-only.

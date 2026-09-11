@@ -13,6 +13,7 @@ class MarketState:
     name: str
     chain_id: int
     pt_price: float | None
+    pt_price_asset: float | None
     apy: float | None
     apy_z: float | None
     pt_1h: float | None
@@ -59,10 +60,10 @@ def build_states(markets, store: HistoryStore) -> list[MarketState]:
             base = apys[:-1]
             sd = pstdev(base) if base else 0
             z = 0 if sd == 0 else (latest.implied_apy - mean(base)) / sd
-        prices = [x.pt_price for x in h[-288:] if x.pt_price is not None]
+        prices = [x.pt_price_asset for x in h[-288:] if x.pt_price_asset is not None and x.pt_price_asset > 0]
         dist = None
-        if latest and latest.pt_price and prices:
-            dist = median(prices) / latest.pt_price - 1
+        if latest and latest.pt_price_asset and prices:
+            dist = median(prices) / latest.pt_price_asset - 1
         state = "WARMUP"
         if len(h) >= 24:
             state = "NEUTRAL"
@@ -71,6 +72,7 @@ def build_states(markets, store: HistoryStore) -> list[MarketState]:
         out.append(MarketState(
             market=market.market_address, name=market.name, chain_id=market.chain_id,
             pt_price=latest.pt_price if latest else market.pt_price_usd,
+            pt_price_asset=latest.pt_price_asset if latest else market.pt_price_asset,
             apy=latest.implied_apy if latest else market.implied_apy,
             apy_z=z, pt_1h=_ret(latest.pt_price, p1.pt_price) if latest and p1 else None,
             pt_4h=_ret(latest.pt_price, p4.pt_price) if latest and p4 else None,
@@ -91,6 +93,6 @@ def print_states(states, top_n: int = 25) -> None:
         def pct(v): return "n/a" if v is None else f"{v:+.2%}"
         z = "n/a" if s.apy_z is None else f"{s.apy_z:+.2f}σ"
         apy = "n/a" if s.apy is None else f"{s.apy:.2%}"
-        pt = "n/a" if s.pt_price is None else f"{s.pt_price:.8f}"
+        pt = "n/a" if s.pt_price_asset is None else f"{s.pt_price_asset:.8f}"
         liq = "n/a" if s.liquidity_usd is None else f"${s.liquidity_usd:,.0f}"
-        print(f"{s.state:<9} ch={s.chain_id:<6} {s.name[:30]:30} PT={pt} APY={apy} z={z} 1h={pct(s.pt_1h)} 4h={pct(s.pt_4h)} U1h={pct(s.underlying_1h)} U4h={pct(s.underlying_4h)} liq={liq} n={s.observations}")
+        print(f"{s.state:<9} ch={s.chain_id:<6} {s.name[:30]:30} PT/U={pt} APY={apy} z={z} 1h={pct(s.pt_1h)} 4h={pct(s.pt_4h)} U1h={pct(s.underlying_1h)} U4h={pct(s.underlying_4h)} liq={liq} n={s.observations}")

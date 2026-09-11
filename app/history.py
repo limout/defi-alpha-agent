@@ -18,6 +18,11 @@ class Snapshot:
     expiry: str
     chain_id: int = 0
     underlying_price_usd: float | None = None
+    pt_price_asset: float | None = None
+    days_to_expiry: float | None = None
+    underlying_id: str | None = None
+    source_ts: str | None = None
+    collection_complete: bool = True
 
 
 class HistoryStore:
@@ -58,10 +63,23 @@ class HistoryStore:
                     expiry TEXT NOT NULL,
                     chain_id INTEGER NOT NULL DEFAULT 0,
                     underlying_price_usd DOUBLE PRECISION,
+                    pt_price_asset DOUBLE PRECISION,
+                    days_to_expiry DOUBLE PRECISION,
+                    underlying_id TEXT,
+                    source_ts TEXT,
+                    collection_complete BOOLEAN NOT NULL DEFAULT TRUE,
                     UNIQUE(timestamp, market)
                 )
                 """
             )
+            for sql in (
+                "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS pt_price_asset DOUBLE PRECISION",
+                "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS days_to_expiry DOUBLE PRECISION",
+                "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS underlying_id TEXT",
+                "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS source_ts TEXT",
+                "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS collection_complete BOOLEAN NOT NULL DEFAULT TRUE",
+            ):
+                self.conn.execute(sql)
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_snapshots_market_time "
                 "ON snapshots(market, timestamp)"
@@ -86,6 +104,11 @@ class HistoryStore:
                 expiry TEXT NOT NULL,
                 chain_id INTEGER NOT NULL DEFAULT 0,
                 underlying_price_usd REAL,
+                pt_price_asset REAL,
+                days_to_expiry REAL,
+                underlying_id TEXT,
+                source_ts TEXT,
+                collection_complete INTEGER NOT NULL DEFAULT 1,
                 UNIQUE(timestamp, market)
             )
             """
@@ -99,6 +122,16 @@ class HistoryStore:
             self.conn.execute(
                 "ALTER TABLE snapshots ADD COLUMN underlying_price_usd REAL"
             )
+        migrations = {
+            "pt_price_asset": "ALTER TABLE snapshots ADD COLUMN pt_price_asset REAL",
+            "days_to_expiry": "ALTER TABLE snapshots ADD COLUMN days_to_expiry REAL",
+            "underlying_id": "ALTER TABLE snapshots ADD COLUMN underlying_id TEXT",
+            "source_ts": "ALTER TABLE snapshots ADD COLUMN source_ts TEXT",
+            "collection_complete": "ALTER TABLE snapshots ADD COLUMN collection_complete INTEGER NOT NULL DEFAULT 1",
+        }
+        for column, sql in migrations.items():
+            if column not in columns:
+                self.conn.execute(sql)
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_snapshots_market_time "
             "ON snapshots(market, timestamp)"
@@ -121,6 +154,11 @@ class HistoryStore:
                 x.expiry,
                 x.chain_id,
                 x.underlying_price_usd,
+                x.pt_price_asset,
+                x.days_to_expiry,
+                x.underlying_id,
+                x.source_ts or x.timestamp,
+                x.collection_complete,
             )
             for x in snapshots
         ]
@@ -133,8 +171,9 @@ class HistoryStore:
                 """
                 INSERT INTO snapshots
                 (timestamp, market, name, pt_price, implied_apy, liquidity_usd,
-                 expiry, chain_id, underlying_price_usd)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 expiry, chain_id, underlying_price_usd, pt_price_asset, days_to_expiry,
+                 underlying_id, source_ts, collection_complete)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (timestamp, market) DO NOTHING
                 """,
                 rows,
@@ -149,8 +188,9 @@ class HistoryStore:
             """
             INSERT OR IGNORE INTO snapshots
             (timestamp, market, name, pt_price, implied_apy, liquidity_usd,
-             expiry, chain_id, underlying_price_usd)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             expiry, chain_id, underlying_price_usd, pt_price_asset, days_to_expiry,
+             underlying_id, source_ts, collection_complete)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -162,7 +202,8 @@ class HistoryStore:
             rows = self.conn.execute(
                 """
                 SELECT timestamp, market, name, pt_price, implied_apy,
-                       liquidity_usd, expiry, chain_id, underlying_price_usd
+                       liquidity_usd, expiry, chain_id, underlying_price_usd,
+                       pt_price_asset, days_to_expiry, underlying_id, source_ts, collection_complete
                 FROM snapshots
                 WHERE market = %s
                 ORDER BY timestamp DESC
@@ -174,7 +215,8 @@ class HistoryStore:
             rows = self.conn.execute(
                 """
                 SELECT timestamp, market, name, pt_price, implied_apy,
-                       liquidity_usd, expiry, chain_id, underlying_price_usd
+                       liquidity_usd, expiry, chain_id, underlying_price_usd,
+                       pt_price_asset, days_to_expiry, underlying_id, source_ts, collection_complete
                 FROM snapshots
                 WHERE market = ?
                 ORDER BY timestamp DESC

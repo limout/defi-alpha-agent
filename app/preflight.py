@@ -17,7 +17,7 @@ async def run_preflight() -> None:
     """
     http = HttpClient()
     try:
-        print("\n=== DEFI ALPHA AGENT v0.5.7 EXECUTION PREFLIGHT ===")
+        print("\n=== DEFI ALPHA AGENT v0.6.0 EXECUTION PREFLIGHT ===")
         print("READ-ONLY / NO WALLET / NO APPROVALS / NO TRANSACTIONS")
         print(f"Capital test: ${settings.paper_capital_usd:,.2f}")
         print(f"Chains: {settings.chain_ids()}\n")
@@ -26,7 +26,7 @@ async def run_preflight() -> None:
         markets, diagnostics = await pendle.all_markets(
             settings.chain_id,
             chain_ids=settings.chain_ids(),
-            min_liquidity_usd=settings.alpha_min_liquidity_usd,
+            min_liquidity_usd=0.0,
         )
 
         candidates = [

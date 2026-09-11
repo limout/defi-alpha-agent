@@ -21,9 +21,15 @@ class Settings(BaseSettings):
     poll_interval_seconds: int = 300
     paper_capital_usd: float = 5_000
     alpha_min_liquidity_usd: float = 1_000_000
-    alpha_round_trip_cost: float = 0.0015
-    alpha_min_net_return: float = 0.0020
-    alpha_min_apy_z: float = 2.5
+    # Used only as a conservative expected-cost estimate. Actual entry
+    # execution is checked with a real Pendle Convert quote.
+    alpha_round_trip_cost: float = 0.0020
+    alpha_min_net_return: float = 0.0010
+    alpha_min_price_z: float = 2.5
+    alpha_min_apy_z: float = 1.5
+    alpha_min_days_to_expiry: float = 21.0
+    alpha_max_days_to_expiry: float = 730.0
+    quote_entry_max_impact: float = 0.0030
     quote_slippage: float = 0.01
     paper_db: str = "data/paper_trades.sqlite3"
     alpha_allow_short_paper: bool = False
@@ -35,6 +41,7 @@ class Settings(BaseSettings):
     backtest_min_history: int = 24
     backtest_max_hold_min: int = 1440
     backtest_cost: float = 0.0020
+    max_snapshot_gap_minutes: int = 23
 
     model_config = SettingsConfigDict(
         env_file=".env",

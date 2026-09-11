@@ -132,13 +132,20 @@ class TradeSimulator:
         if raw_out is None:
             return None
         fee, impact, effective_apy = _quote_route_data(payload)
+        pt_decimals = market.pt_decimals
+        if pt_decimals is None:
+            pt_decimals = await self.pendle.resolve_token_decimals(market.chain_id, market.pt_address)
+            market.pt_decimals = pt_decimals
+        if pt_decimals is None:
+            return None
+        pt_amount = int(raw_out) / (10 ** pt_decimals)
         return QuoteLeg(
             side="BUY_PT",
             input_token=market.underlying_address,
             input_amount_raw=str(raw_in),
             output_token=market.pt_address,
             output_amount_raw=raw_out,
-            output_amount_usd=float(raw_out) / 1e18 * market.pt_price_usd,
+            output_amount_usd=pt_amount * underlying_price,
             fee_usd=fee,
             price_impact=impact,
             effective_apy=effective_apy,

@@ -35,6 +35,12 @@ class PTMarket:
     sy_address: str | None = None
     yt_address: str | None = None
     underlying_address: str | None = None
+    underlying_asset_id: str | None = None
+    pt_price_asset: float | None = None
+    days_to_expiry: float | None = None
+    collection_complete: bool = True
+    source_ts: str | None = None
+    pt_decimals: int | None = None
 
     # v0.2.2 exitability diagnostics.
     swap_available: bool | None = None
@@ -562,7 +568,10 @@ class PendleClient:
                 "additionalData": "impliedApy,effectiveApy",
                 "redeemRewards": False,
                 "needScale": False,
-                "useLimitOrder": True,
+                # Conservative monitoring quote: do not allow a limit-order
+                # route to make the execution sanity check look better than a
+                # straightforward marketable route.
+                "useLimitOrder": False,
             },
         )
 
@@ -974,10 +983,8 @@ class PendleClient:
             if liquidity_usd is not None:
                 liquidity_count += 1
 
-            # Do not spend a swap-price request on markets that cannot be
-            # traded by the alpha strategy anyway.
-            if min_liquidity_usd and (liquidity_usd is None or liquidity_usd < min_liquidity_usd):
-                continue
+            # v0.6: keep the full future universe in history. Liquidity is a
+            # decision-time signal filter, not an ingestion filter.
 
             # IMPORTANT: do not call the per-market swapping-price SDK endpoint
             # during collection. Pendle explicitly recommends bulk market/price
@@ -1008,6 +1015,20 @@ class PendleClient:
             if pt_price_usd is not None:
                 pt_price_count += 1
 
+            expiry_value = self._extract_expiry(market) or ""
+            days_to_expiry = None
+            try:
+                expiry_dt = datetime.fromisoformat(expiry_value.replace("Z", "+00:00"))
+                if expiry_dt.tzinfo is None:
+                    expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+                days_to_expiry = max(0.0, (expiry_dt - datetime.now(timezone.utc)).total_seconds() / 86400.0)
+            except ValueError:
+                pass
+            underlying_price_usd = asset_prices.get(underlying_asset_id) if underlying_asset_id else None
+            pt_price_asset = None
+            if pt_price_usd is not None and underlying_price_usd is not None and underlying_price_usd > 0:
+                pt_price_asset = pt_price_usd / underlying_price_usd
+
             item = PTMarket(
                 chain_id=market_chain_id,
                 market_address=market_address,
@@ -1017,7 +1038,7 @@ class PendleClient:
                     or market.get("symbol")
                     or "Unknown"
                 ),
-                expiry=self._extract_expiry(market) or "",
+                expiry=expiry_value,
                 implied_apy=implied_apy,
                 pt_price_usd=pt_price_usd,
                 liquidity_usd=liquidity_usd,
@@ -1030,20 +1051,19 @@ class PendleClient:
                     "yt",
                 ),
                 underlying_address=(
-                    self._extract_token_address(
-                        market,
-                        "underlying",
-                    )
-                    or self._extract_token_address(
-                        market,
-                        "underlyingAsset",
-                    )
+                    self._extract_token_address(market, "underlying")
+                    or self._extract_token_address(market, "underlyingAsset")
                 ),
+                underlying_asset_id=underlying_asset_id,
+                pt_price_asset=pt_price_asset,
+                days_to_expiry=days_to_expiry,
+                collection_complete=not page_errors,
+                source_ts=datetime.now(timezone.utc).isoformat(),
                 swap_available=swap_available,
                 swap_implied_apy=swap_implied_apy,
                 underlying_token_to_pt_rate=underlying_to_pt_rate,
                 pt_to_underlying_token_rate=pt_to_underlying_rate,
-                underlying_price_usd=(asset_prices.get(underlying_asset_id) if underlying_asset_id else None),
+                underlying_price_usd=underlying_price_usd,
                 underlying_decimals=(
                     self._extract_token_decimals(market, "underlying")
                     or self._extract_token_decimals(market, "underlyingAsset")
