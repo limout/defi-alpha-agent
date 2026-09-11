@@ -117,9 +117,9 @@ async def mark_paper_positions(markets, ledger, pendle):
 
 
 async def run_once():
-    http = HttpClient(); store = HistoryStore(settings.history_db); ledger = PaperLedger(settings.paper_db)
+    http = HttpClient(); store = HistoryStore(settings.history_db, settings.database_url); ledger = PaperLedger(settings.paper_db, settings.database_url)
     try:
-        print("\n=== DEFI ALPHA AGENT v0.5.7 ===")
+        print("\n=== DEFI ALPHA AGENT v0.5.8 ===")
         print("SHORT-HORIZON / PAPER MODE / REAL PENDLE QUOTES")
         print("No wallet. No approvals. No transactions.\n")
         pendle = PendleClient(http)
@@ -137,16 +137,16 @@ async def run_once():
         await simulate_candidates(markets, signals, pendle, ledger)
         write_signal_snapshot(signals)
         print(f"\nPaper summary: {json.dumps(ledger.summary(), indent=2)}")
-        print(f"History DB: {settings.history_db}")
-        print(f"Paper DB: {settings.paper_db}")
+        print(f"History DB: {store.info()}")
+        print(f"Paper DB: {ledger.info()}")
     finally:
         ledger.close(); store.close(); await http.close()
 
 
 async def run_daemon():
-    http = HttpClient(); store = HistoryStore(settings.history_db); ledger = PaperLedger(settings.paper_db)
+    http = HttpClient(); store = HistoryStore(settings.history_db, settings.database_url); ledger = PaperLedger(settings.paper_db, settings.database_url)
     try:
-        print("\n=== DEFI ALPHA AGENT v0.5.7 DAEMON ===")
+        print("\n=== DEFI ALPHA AGENT v0.5.8 DAEMON ===")
         print(f"Polling every {settings.poll_interval_seconds}s")
         print("PAPER MODE ONLY / REAL PENDLE QUOTES FOR CANDIDATES\n")
         while True:

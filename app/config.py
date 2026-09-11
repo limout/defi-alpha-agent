@@ -3,9 +3,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     chain_id: int = 42161
-    # Cross-chain universe. Keep this as a comma-separated env setting so the
-    # free/local deployment stays simple and does not need a separate config file.
     pendle_chain_ids: str = "42161,1,8453,56"
+
+    # Persistent database. When set, HistoryStore and PaperLedger use Neon.
+    # Without it, they fall back to local SQLite.
+    database_url: str | None = None
 
     # Legacy PT/Morpho scanner.
     min_market_liquidity_usd: float = 50_000
@@ -26,11 +28,9 @@ class Settings(BaseSettings):
     paper_db: str = "data/paper_trades.sqlite3"
     alpha_allow_short_paper: bool = False
 
-    # Underlying confirmation: don't fade a large underlying move.
     underlying_adverse_1h: float = 0.005
     underlying_adverse_4h: float = 0.012
 
-    # Universe diagnostics / backtest.
     diagnostic_top_n: int = 25
     backtest_min_history: int = 24
     backtest_max_hold_min: int = 1440
