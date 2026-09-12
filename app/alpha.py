@@ -23,6 +23,18 @@ def now_iso() -> str:
 async def collect_once(http: HttpClient, store: HistoryStore):
     pendle = PendleClient(http)
     markets, diagnostics = await pendle.all_markets(settings.chain_id, chain_ids=settings.chain_ids(), min_liquidity_usd=0.0)
+
+    # Safe legacy-history migration: only markets whose current Pendle metadata
+    # proves accountingAsset == underlyingAsset can reuse old PT/underlying data.
+    # Wrapper/yield-token markets are deliberately left as warm-up history.
+    market_map = {
+        m.market_address: (m.underlying_asset_id, m.accounting_asset_id)
+        for m in markets
+    }
+    legacy_backfilled = store.backfill_legacy_equal_asset_markets(market_map)
+    if legacy_backfilled:
+        print(f"[collection] legacy history backfilled: {legacy_backfilled} snapshots (equal accounting/underlying only)", flush=True)
+
     timestamp = now_iso()
     snapshots = [
         Snapshot(
@@ -38,6 +50,8 @@ async def collect_once(http: HttpClient, store: HistoryStore):
             pt_price_asset=m.pt_price_asset,
             days_to_expiry=m.days_to_expiry,
             underlying_id=m.underlying_asset_id,
+            accounting_asset_id=m.accounting_asset_id,
+            price_basis=m.valuation_basis,
             source_ts=timestamp,
             collection_complete=not diagnostics.get("page_errors"),
         )
@@ -72,7 +86,7 @@ def print_signals(signals):
         return
     for i, s in enumerate(signals[:10], 1):
         print(f"{i:>2}. {s.side:<4} {s.name[:32]:32} {s.kind:<15} model_net={s.expected_net_return:+.2%} PnL=${s.expected_net_pnl:+.2f} price-z={s.price_z:+.2f}σ APY-z={s.apy_z:+.2f}σ conf={s.confidence}%")
-        print(f"    PT/underlying entry={s.entry:.8f} target={s.target:.8f} stop={s.stop:.8f} TTM={s.days_to_expiry:.1f}d liq=${s.liquidity_usd:,.0f}")
+        print(f"    PT/accounting asset entry={s.entry:.8f} target={s.target:.8f} stop={s.stop:.8f} TTM={s.days_to_expiry:.1f}d liq=${s.liquidity_usd:,.0f}")
         print(f"    {s.reason}")
         if s.underlying_return_1h is not None:
             print(f"    underlying: 1h={s.underlying_return_1h:+.2%} 4h={s.underlying_return_4h:+.2%}")
@@ -118,24 +132,20 @@ async def simulate_candidates(markets, signals, pendle, ledger):
         if pt_amount <= 0:
             print("  REJECT: zero PT output")
             continue
-        # Entry is stored in the same PT/underlying units used by the signal.
-        # Use the actual quoted underlying input amount rather than marking PT
-        # at par in USD.
-        underlying_decimals = market.underlying_decimals
-        if underlying_decimals is None:
-            underlying_decimals = await pendle.resolve_token_decimals(
-                market.chain_id, market.underlying_address
-            )
-            market.underlying_decimals = underlying_decimals
-        if underlying_decimals is None:
-            print("  REJECT: underlying decimals unavailable")
+        # Entry is stored in the same PT/accounting-asset units used by the
+        # research signal. The real quote is USDC -> PT, so convert the exact
+        # USDC capital into accounting-asset units using the market's current
+        # accounting-asset USD price.
+        accounting_price = market.accounting_asset_price_usd
+        if accounting_price is None or accounting_price <= 0:
+            print("  REJECT: accounting asset USD price unavailable")
             continue
-        underlying_in = int(entry.input_amount_raw) / (10 ** underlying_decimals)
-        entry_asset = underlying_in / pt_amount
+        accounting_in = settings.paper_capital_usd / accounting_price
+        entry_asset = accounting_in / pt_amount
         target_asset = signal.target
         stop_asset = signal.stop
         # Keep the legacy *_usd columns populated for compatibility, but store
-        # the research/execution entry explicitly in PT/underlying units.
+        # the research/execution entry explicitly in PT/accounting asset units.
         entry_usd = settings.paper_capital_usd / pt_amount
         ledger.open_trade(
             signal.market, signal.name, settings.paper_capital_usd,
@@ -168,7 +178,7 @@ async def mark_paper_positions(markets, ledger, pendle):
         hit_stop = current_asset <= stop_asset
         hit_timeout = age_min >= settings.backtest_max_hold_min
         if not hit_target and not hit_stop and not hit_timeout:
-            print(f"OPEN #{trade.id} {trade.name}: PT/underlying={current_asset:.8f} target={target_asset:.8f} stop={stop_asset:.8f} age={age_min:.0f}m")
+            print(f"OPEN #{trade.id} {trade.name}: PT/accounting asset={current_asset:.8f} target={target_asset:.8f} stop={stop_asset:.8f} age={age_min:.0f}m")
             continue
         reason = "TARGET" if hit_target else ("STOP" if hit_stop else "TIMEOUT")
         try:
@@ -186,9 +196,9 @@ async def mark_paper_positions(markets, ledger, pendle):
 
 
 async def run_once():
-    http = HttpClient(); store = HistoryStore(settings.history_db, settings.database_url); ledger = PaperLedger(settings.paper_db, settings.database_url)
+    http = HttpClient(); store = HistoryStore(database_url=settings.database_url); ledger = PaperLedger(database_url=settings.database_url)
     try:
-        print("\n=== DEFI ALPHA AGENT v0.6.1 ===")
+        print("\n=== DEFI ALPHA AGENT v0.6.20 ===")
         print("SHORT-HORIZON / PAPER MODE / REAL PENDLE QUOTES")
         print("No wallet. No approvals. No transactions.\n")
         pendle = PendleClient(http)
@@ -213,9 +223,9 @@ async def run_once():
 
 
 async def run_daemon():
-    http = HttpClient(); store = HistoryStore(settings.history_db, settings.database_url); ledger = PaperLedger(settings.paper_db, settings.database_url)
+    http = HttpClient(); store = HistoryStore(database_url=settings.database_url); ledger = PaperLedger(database_url=settings.database_url)
     try:
-        print("\n=== DEFI ALPHA AGENT v0.6.1 DAEMON ===")
+        print("\n=== DEFI ALPHA AGENT v0.6.20 DAEMON ===")
         print(f"Polling every {settings.poll_interval_seconds}s")
         print("PAPER MODE ONLY / REAL PENDLE QUOTES FOR CANDIDATES\n")
         while True:

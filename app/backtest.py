@@ -26,11 +26,15 @@ def _ts(value: str) -> float:
 
 
 def _asset_price(s: Snapshot | None) -> float | None:
-    # Backtests must use only explicitly stored v0.6 PT/underlying observations.
+    # Backtests must use only explicitly stored v0.6 PT/accounting asset observations.
     # Do not reconstruct legacy v0.5.8 rows from two USD feeds.
     if s is None:
         return None
-    if s.pt_price_asset is not None and s.pt_price_asset > 0:
+    if (
+        s.pt_price_asset is not None
+        and s.pt_price_asset > 0
+        and s.price_basis == "ACCOUNTING_ASSET"
+    ):
         return s.pt_price_asset
     return None
 

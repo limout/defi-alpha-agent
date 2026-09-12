@@ -5,8 +5,9 @@ from .carry import main_async as carry_main_async
 from .backtest import run_backtest, print_report
 from .config import settings
 from .history import HistoryStore
-from .paper import PaperLedger
 from .preflight import run_preflight
+from .paper import PaperLedger
+from .monitor import show_signal_history, show_opportunities
 
 
 def main():
@@ -17,13 +18,8 @@ def main():
         "command",
         nargs="?",
         default="alpha",
-        choices=("alpha", "collect", "daemon", "carry", "backtest", "preflight", "dbcheck"),
-        help=(
-            "alpha=signal scan, collect=one data collection, daemon=continuous scan, "
-            "carry=legacy PT/Morpho scanner, backtest=local historical replay, "
-            "preflight=one read-only Pendle two-sided quote test, "
-            "dbcheck=test persistent database"
-        ),
+        choices=("alpha", "collect", "daemon", "carry", "backtest", "preflight", "dbcheck", "signals", "opportunities"),
+        help="alpha=signal scan, collect=one data collection, daemon=continuous scan, carry=legacy PT/Morpho scanner, backtest=local historical replay, preflight=one read-only Pendle two-sided quote test, dbcheck=database check, signals=historical signal episodes, opportunities=current near-misses",
     )
     args = parser.parse_args()
 
@@ -34,7 +30,7 @@ def main():
     elif args.command == "carry":
         asyncio.run(carry_main_async())
     elif args.command == "backtest":
-        store = HistoryStore(settings.history_db, settings.database_url)
+        store = HistoryStore(database_url=settings.database_url)
         try:
             print_report(run_backtest(store))
         finally:
@@ -42,8 +38,8 @@ def main():
     elif args.command == "preflight":
         asyncio.run(run_preflight())
     elif args.command == "dbcheck":
-        history = HistoryStore(settings.history_db, settings.database_url)
-        paper = PaperLedger(settings.paper_db, settings.database_url)
+        history = HistoryStore(database_url=settings.database_url)
+        paper = PaperLedger(database_url=settings.database_url)
         try:
             print(f"History DB: {history.info()}")
             print(f"Paper DB:   {paper.info()}")
@@ -53,7 +49,12 @@ def main():
         finally:
             paper.close()
             history.close()
-
-
-if __name__ == "__main__":
-    main()
+    elif args.command in ("signals", "opportunities"):
+        store = HistoryStore(database_url=settings.database_url)
+        try:
+            if args.command == "signals":
+                show_signal_history(store)
+            else:
+                asyncio.run(show_opportunities(store))
+        finally:
+            store.close()

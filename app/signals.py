@@ -88,12 +88,16 @@ def _return(current: float | None, old: float | None) -> float | None:
 
 
 def _asset_price(s: Snapshot | None) -> float | None:
-    # v0.6+ research must use the explicitly stored PT/underlying observation.
+    # v0.6+ research must use the explicitly stored PT/accounting asset observation.
     # Never reconstruct it from legacy USD prints: doing so can mix two
     # independently-timed feeds and create artificial dislocations.
     if s is None:
         return None
-    if s.pt_price_asset is not None and s.pt_price_asset > 0:
+    if (
+        s.pt_price_asset is not None
+        and s.pt_price_asset > 0
+        and s.price_basis == "ACCOUNTING_ASSET"
+    ):
         return s.pt_price_asset
     return None
 
@@ -143,19 +147,23 @@ def detect_signal(
     if not min_days_to_expiry <= latest.days_to_expiry <= max_days_to_expiry:
         return None
 
-    p1 = _value_at_or_before(history, 60, max_snapshot_gap_minutes)
-    p4 = _value_at_or_before(history, 240, max_snapshot_gap_minutes)
+    # Missing 1h/4h observations are normal around collection gaps. They are
+    # supporting confirmation signals, not a reason to discard the market
+    # before its core statistical test runs.
+    p1 = _value_at_or_before(history, 60, max(max_snapshot_gap_minutes, 30))
+    p4 = _value_at_or_before(history, 240, max(max_snapshot_gap_minutes, 60))
     p1_asset = _asset_price(p1) if p1 else None
     p4_asset = _asset_price(p4) if p4 else None
     r1 = _return(current_asset, p1_asset)
     r4 = _return(current_asset, p4_asset)
-    if r1 is None or r4 is None:
-        return None
-
     ur1 = _return(latest.underlying_price_usd, p1.underlying_price_usd if p1 else None)
     ur4 = _return(latest.underlying_price_usd, p4.underlying_price_usd if p4 else None)
 
     window = history[-288:]
+    # _asset_price() only returns canonical ACCOUNTING_ASSET observations.
+    # Keep all such observations for this market; the raw accounting_asset_id
+    # field may differ in legacy rows even though the stored PT/accounting
+    # asset valuation is already normalized.
     asset_prices = [_asset_price(x) for x in window]
     log_prices = [log(x) for x in asset_prices if x is not None and x > 0]
     if len(log_prices) < 20:
@@ -207,7 +215,7 @@ def detect_signal(
     pnl = capital * net
     underlying_text = "underlying n/a" if ur1 is None else f"underlying 1h {ur1:+.2%}"
     reason = (
-        f"PT/underlying price z={price_z:+.2f}σ; APY z={apy_z:+.2f}σ in {bucket}; "
+        f"PT/accounting asset price z={price_z:+.2f}σ; APY z={apy_z:+.2f}σ in {bucket}; "
         f"discount to median {distance:+.2%}; 1h {r1:+.2%}; 4h {r4:+.2%}; {underlying_text}."
     )
 

@@ -60,9 +60,9 @@ def build_states(markets, store: HistoryStore) -> list[MarketState]:
             base = apys[:-1]
             sd = pstdev(base) if base else 0
             z = 0 if sd == 0 else (latest.implied_apy - mean(base)) / sd
-        prices = [x.pt_price_asset for x in h[-288:] if x.pt_price_asset is not None and x.pt_price_asset > 0]
+        prices = [x.pt_price_asset for x in h[-288:] if x.pt_price_asset is not None and x.pt_price_asset > 0 and x.price_basis == "ACCOUNTING_ASSET"]
         dist = None
-        if latest and latest.pt_price_asset and prices:
+        if latest and latest.pt_price_asset and latest.price_basis == "ACCOUNTING_ASSET" and prices:
             dist = median(prices) / latest.pt_price_asset - 1
         state = "WARMUP"
         if len(h) >= 24:

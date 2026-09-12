@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
+import os
 
 from app.http import HttpClient
 
@@ -14,10 +15,24 @@ ARBITRUM_CHAIN_ID = 42161
 # Pendle bulk metadata does not expose token decimals. Override with env vars
 # in production if desired. These calls are read-only eth_call requests.
 DEFAULT_RPC_URLS = {
-    1: "https://eth.llamarpc.com",
-    56: "https://binance.llamarpc.com",
-    8453: "https://base.llamarpc.com",
-    42161: "https://arb1.arbitrum.io/rpc",
+    # Keep multiple public endpoints: decimals is only a read-only preflight,
+    # and a transient failure of one RPC must not break the collector.
+    1: [
+        "https://ethereum-rpc.publicnode.com",
+        "https://eth.llamarpc.com",
+    ],
+    56: [
+        "https://bsc-rpc.publicnode.com",
+        "https://binance.llamarpc.com",
+    ],
+    8453: [
+        "https://base-rpc.publicnode.com",
+        "https://base.llamarpc.com",
+    ],
+    42161: [
+        "https://arbitrum-one-rpc.publicnode.com",
+        "https://arb1.arbitrum.io/rpc",
+    ],
 }
 DECIMALS_SELECTOR = "0x313ce567"
 
@@ -36,7 +51,10 @@ class PTMarket:
     yt_address: str | None = None
     underlying_address: str | None = None
     underlying_asset_id: str | None = None
+    accounting_asset_id: str | None = None
+    accounting_asset_price_usd: float | None = None
     pt_price_asset: float | None = None
+    valuation_basis: str = "ACCOUNTING_ASSET"
     days_to_expiry: float | None = None
     collection_complete: bool = True
     source_ts: str | None = None
@@ -259,6 +277,41 @@ class PendleClient:
             if address and address.startswith("0x"):
                 return address
 
+        return None
+
+    @staticmethod
+    def _extract_accounting_asset_id(market: dict[str, Any]) -> str | None:
+        """Return Pendle's accounting asset id when the market payload exposes it.
+
+        PT is redeemed 1:1 for the accounting asset shown in parentheses in
+        the market name, not necessarily the SY/yield-bearing wrapper.
+        Prefer an explicit accountingAsset field and only fall back to nested
+        SY metadata. If neither is present, callers may safely fall back to
+        the market's underlying asset as a legacy compatibility path.
+        """
+        candidates: list[Any] = [market.get("accountingAsset")]
+        sy = market.get("sy")
+        if isinstance(sy, dict):
+            candidates.append(sy.get("accountingAsset"))
+        tokens = market.get("tokens")
+        if isinstance(tokens, dict):
+            sy_token = tokens.get("sy")
+            if isinstance(sy_token, dict):
+                candidates.append(sy_token.get("accountingAsset"))
+
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                candidate = (
+                    candidate.get("id")
+                    or candidate.get("assetId")
+                    or candidate.get("address")
+                    or candidate.get("tokenAddress")
+                )
+            if candidate is None:
+                continue
+            text = str(candidate).strip().lower()
+            if text:
+                return text
         return None
 
     @staticmethod
@@ -562,16 +615,18 @@ class PendleClient:
             {
                 "receiver": receiver,
                 "slippage": slippage,
-                "enableAggregator": False,
+                # USDC is often not the market accounting/underlying token.
+                # Let Pendle route the token hop instead of asking the native
+                # PT converter to handle an unsupported direct conversion.
+                "enableAggregator": True,
                 "inputs": inputs,
                 "outputs": outputs,
                 "additionalData": "impliedApy,effectiveApy",
                 "redeemRewards": False,
                 "needScale": False,
-                # Conservative monitoring quote: do not allow a limit-order
-                # route to make the execution sanity check look better than a
-                # straightforward marketable route.
-                "useLimitOrder": False,
+                # Keep the quote representative of an executable market
+                # route. Pendle's current Convert API defaults this to true.
+                "useLimitOrder": True,
             },
         )
 
@@ -766,51 +821,76 @@ class PendleClient:
         if cached is not None:
             return cached
 
-        rpc_url = DEFAULT_RPC_URLS.get(int(chain_id))
-        if not rpc_url:
+        rpc_urls = list(DEFAULT_RPC_URLS.get(int(chain_id), []))
+        env_rpc = os.getenv(f"RPC_URL_{int(chain_id)}")
+        if env_rpc:
+            rpc_urls.insert(0, env_rpc.strip())
+        rpc_urls = [url for i, url in enumerate(rpc_urls) if url and url not in rpc_urls[:i]]
+        if not rpc_urls:
             return None
 
-        try:
-            payload = await self.http.post_json(
-                rpc_url,
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_call",
+            "params": [
                 {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "eth_call",
-                    "params": [
-                        {
-                            "to": normalized,
-                            "data": DECIMALS_SELECTOR,
-                        },
-                        "latest",
-                    ],
+                    "to": normalized,
+                    "data": DECIMALS_SELECTOR,
                 },
-            )
-        except Exception as exc:
-            print(
-                f"    decimals RPC failed ch={chain_id} token={normalized}: "
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            return None
+                "latest",
+            ],
+        }
 
-        if not isinstance(payload, dict) or payload.get("error"):
-            return None
+        for index, rpc_url in enumerate(rpc_urls):
+            try:
+                payload = await self.http.post_json(rpc_url, request)
+            except Exception as exc:
+                suffix = "" if index == len(rpc_urls) - 1 else "; trying fallback RPC"
+                print(
+                    f"    decimals RPC failed ch={chain_id} token={normalized} "
+                    f"url={rpc_url}: {type(exc).__name__}: {exc}{suffix}",
+                    flush=True,
+                )
+                continue
 
-        raw = payload.get("result")
-        if not isinstance(raw, str) or not raw.startswith("0x"):
-            return None
+            if not isinstance(payload, dict) or payload.get("error"):
+                if index < len(rpc_urls) - 1:
+                    print(
+                        f"    decimals RPC returned error ch={chain_id} token={normalized} "
+                        f"url={rpc_url}; trying fallback RPC",
+                        flush=True,
+                    )
+                    continue
+                return None
 
-        try:
-            decimals = int(raw, 16)
-        except ValueError:
-            return None
+            raw = payload.get("result")
+            if not isinstance(raw, str) or not raw.startswith("0x"):
+                if index < len(rpc_urls) - 1:
+                    print(
+                        f"    decimals RPC returned invalid result ch={chain_id} token={normalized} "
+                        f"url={rpc_url}; trying fallback RPC",
+                        flush=True,
+                    )
+                    continue
+                return None
 
-        if not 0 <= decimals <= 36:
-            return None
+            try:
+                decimals = int(raw, 16)
+            except ValueError:
+                if index < len(rpc_urls) - 1:
+                    continue
+                return None
 
-        self._decimals_cache[key] = decimals
-        return decimals
+            if not 0 <= decimals <= 36:
+                if index < len(rpc_urls) - 1:
+                    continue
+                return None
+
+            self._decimals_cache[key] = decimals
+            return decimals
+
+        return None
 
     async def all_markets(
         self,
@@ -916,25 +996,37 @@ class PendleClient:
         result: list[PTMarket] = []
 
         underlying_ids: list[str] = []
+        accounting_ids: list[str] = []
         pt_ids: list[str] = []
         for market in current_markets:
             raw_underlying = market.get("underlyingAsset") or market.get("underlying")
             if raw_underlying:
-                text = str(raw_underlying).strip()
+                text = str(raw_underlying).strip().lower()
                 if text and text not in underlying_ids:
                     underlying_ids.append(text)
+            raw_accounting = self._extract_accounting_asset_id(market)
+            if raw_accounting:
+                text = str(raw_accounting).strip().lower()
+                try:
+                    chain_for_asset = int(market.get("chainId"))
+                except (TypeError, ValueError):
+                    chain_for_asset = 0
+                if text.startswith("0x") and chain_for_asset:
+                    text = f"{chain_for_asset}-{text}"
+                if text and text not in accounting_ids:
+                    accounting_ids.append(text)
             raw_pt = market.get("pt")
             if raw_pt:
-                text = str(raw_pt).strip()
+                text = str(raw_pt).strip().lower()
                 if text and text not in pt_ids:
                     pt_ids.append(text)
 
-        price_ids = list(dict.fromkeys(underlying_ids + pt_ids))
+        price_ids = list(dict.fromkeys(underlying_ids + accounting_ids + pt_ids))
 
         # Prices are available in bulk for both underlying assets and PTs.
         # Use the PT price directly when available instead of reconstructing
         # it from an underlying/spot swap rate.
-        print(f"[collection] pricing {len(price_ids)} unique assets ({len(underlying_ids)} underlying + {len(pt_ids)} PT) ...", flush=True)
+        print(f"[collection] pricing {len(price_ids)} unique assets ({len(underlying_ids)} underlying + {len(accounting_ids)} accounting + {len(pt_ids)} PT) ...", flush=True)
         try:
             asset_prices = await self._fetch_asset_prices(price_ids)
         except Exception as exc:
@@ -1025,9 +1117,28 @@ class PendleClient:
             except ValueError:
                 pass
             underlying_price_usd = asset_prices.get(underlying_asset_id) if underlying_asset_id else None
+            explicit_accounting_asset_id = self._extract_accounting_asset_id(market)
+            accounting_asset_id = explicit_accounting_asset_id
+            if accounting_asset_id is not None:
+                accounting_asset_id = str(accounting_asset_id).strip().lower()
+                if accounting_asset_id.startswith("0x"):
+                    accounting_asset_id = f"{market_chain_id}-{accounting_asset_id}"
+            if accounting_asset_id is None:
+                accounting_asset_id = underlying_asset_id
+            accounting_asset_price_usd = (
+                asset_prices.get(accounting_asset_id)
+                if accounting_asset_id
+                else None
+            )
+            if explicit_accounting_asset_id is not None and accounting_asset_price_usd and accounting_asset_price_usd > 0:
+                valuation_basis = "ACCOUNTING_ASSET"
+            elif accounting_asset_price_usd and accounting_asset_price_usd > 0:
+                valuation_basis = "UNDERLYING_FALLBACK"
+            else:
+                valuation_basis = "UNAVAILABLE"
             pt_price_asset = None
-            if pt_price_usd is not None and underlying_price_usd is not None and underlying_price_usd > 0:
-                pt_price_asset = pt_price_usd / underlying_price_usd
+            if pt_price_usd is not None and accounting_asset_price_usd is not None and accounting_asset_price_usd > 0:
+                pt_price_asset = pt_price_usd / accounting_asset_price_usd
 
             item = PTMarket(
                 chain_id=market_chain_id,
@@ -1055,7 +1166,10 @@ class PendleClient:
                     or self._extract_token_address(market, "underlyingAsset")
                 ),
                 underlying_asset_id=underlying_asset_id,
+                accounting_asset_id=accounting_asset_id,
+                accounting_asset_price_usd=accounting_asset_price_usd,
                 pt_price_asset=pt_price_asset,
+                valuation_basis=valuation_basis,
                 days_to_expiry=days_to_expiry,
                 collection_complete=not page_errors,
                 source_ts=datetime.now(timezone.utc).isoformat(),

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "defi-alpha-agent"
-version = "0.6.0"
+version = "0.6.17"
 description = "Read-only DeFi opportunity scanner for Pendle, Morpho and GMX"
 requires-python = ">=3.11"
 dependencies = [

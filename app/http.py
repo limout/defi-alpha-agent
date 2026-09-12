@@ -27,7 +27,32 @@ class HttpClient:
                 if self.verbose:
                     print(f"    HTTP {response.status_code} {method} {url}", flush=True)
 
-                if response.status_code == 429 or response.status_code >= 500:
+                # Retry ordinary transient upstream failures, but do not
+                # blindly retry Cloudflare TLS/origin errors such as 525.
+                # A caller with a fallback endpoint should fail over instead.
+                retryable = (
+                    response.status_code == 429
+                    or 500 <= response.status_code <= 504
+                    or 520 <= response.status_code <= 524
+                    or 527 <= response.status_code <= 529
+                )
+
+                # A 4xx is a request/schema/routing problem, not a transient
+                # network failure. Do not burn retries on it. Include Pendle's
+                # response body in the exception so quote failures are
+                # diagnosable instead of appearing as a generic HTTP 400.
+                if 400 <= response.status_code < 500 and response.status_code != 429:
+                    try:
+                        detail = response.text[:1000]
+                    except Exception:
+                        detail = "<response body unavailable>"
+                    raise httpx.HTTPStatusError(
+                        f"HTTP {response.status_code}: {detail}",
+                        request=response.request,
+                        response=response,
+                    )
+
+                if retryable:
                     retry_after = response.headers.get("Retry-After")
                     response.raise_for_status()
 

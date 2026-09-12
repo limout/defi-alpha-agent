@@ -5,9 +5,8 @@ class Settings(BaseSettings):
     chain_id: int = 42161
     pendle_chain_ids: str = "42161,1,8453,56"
 
-    # Persistent database. When set, HistoryStore and PaperLedger use Neon.
-    # Without it, they fall back to local SQLite.
-    database_url: str | None = None
+    # Persistent database. Neon PostgreSQL is mandatory.
+    database_url: str
 
     # Legacy PT/Morpho scanner.
     min_market_liquidity_usd: float = 50_000
@@ -16,13 +15,12 @@ class Settings(BaseSettings):
     snapshot_dir: str = "data/snapshots"
 
     # Short-horizon alpha engine.
-    history_db: str = "data/alpha_history.sqlite3"
     alpha_snapshot_dir: str = "data/alpha_signals"
     poll_interval_seconds: int = 300
     paper_capital_usd: float = 5_000
     alpha_min_liquidity_usd: float = 1_000_000
-    # Used only as a conservative expected-cost estimate. Actual entry
-    # execution is checked with a real Pendle Convert quote.
+    # Used only as a conservative pre-quote screen. Actual execution cost in
+    # opportunities is always replaced by a real USDC -> PT -> USDC quote.
     alpha_round_trip_cost: float = 0.0020
     alpha_min_net_return: float = 0.0010
     alpha_min_price_z: float = 2.5
@@ -31,7 +29,6 @@ class Settings(BaseSettings):
     alpha_max_days_to_expiry: float = 730.0
     quote_entry_max_impact: float = 0.0030
     quote_slippage: float = 0.01
-    paper_db: str = "data/paper_trades.sqlite3"
     alpha_allow_short_paper: bool = False
 
     underlying_adverse_1h: float = 0.005
