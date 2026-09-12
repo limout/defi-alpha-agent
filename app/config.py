@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     alpha_max_days_to_expiry: float = 730.0
     quote_entry_max_impact: float = 0.0030
     quote_slippage: float = 0.01
+    quote_cache_ttl_minutes: int = 15
     alpha_allow_short_paper: bool = False
 
     underlying_adverse_1h: float = 0.005

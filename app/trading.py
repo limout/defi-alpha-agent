@@ -20,7 +20,14 @@ USDC_ADDRESSES = {
     8453: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     56: "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
 }
-USDC_DECIMALS = 6
+# Circle native USDC on Ethereum / Arbitrum / Base is 6 decimals. Do not use
+# this for BNB: the configured Binance-peg USDC is a different token and must
+# be resolved on-chain (it is 18 decimals).
+NATIVE_USDC_FALLBACK_DECIMALS = {
+    1: 6,
+    42161: 6,
+    8453: 6,
+}
 
 
 
@@ -142,14 +149,30 @@ class TradeSimulator:
         return int(amount * (10 ** decimals))
 
     @staticmethod
-    def _quote_token(chain_id: int) -> tuple[str, int] | None:
+    def quote_token_address(chain_id: int) -> str | None:
         import os
 
         override = os.getenv(f"QUOTE_TOKEN_{int(chain_id)}")
         token = (override or USDC_ADDRESSES.get(int(chain_id)) or "").strip()
+        return token or None
+
+    async def _quote_token(self, chain_id: int) -> tuple[str, int] | None:
+        token = self.quote_token_address(chain_id)
         if not token:
             return None
-        return token, USDC_DECIMALS
+        decimals = await self.pendle.resolve_token_decimals(chain_id, token)
+        if decimals is None:
+            decimals = NATIVE_USDC_FALLBACK_DECIMALS.get(int(chain_id))
+        if decimals is None:
+            return None
+        return token, decimals
+
+    @staticmethod
+    def _pt_mark_usd(market: PTMarket, pt_amount: float) -> float:
+        """Diagnostic PT inventory mark using the market PT USD print, not par."""
+        if market.pt_price_usd is not None and market.pt_price_usd > 0:
+            return pt_amount * market.pt_price_usd
+        return 0.0
 
     async def quote_buy(self, market: PTMarket, capital_usd: float) -> QuoteLeg | None:
         """Quote the exact scanner trade: USDC -> PT.
@@ -161,7 +184,7 @@ class TradeSimulator:
         """
         if not market.pt_address:
             return None
-        quote_token = self._quote_token(market.chain_id)
+        quote_token = await self._quote_token(market.chain_id)
         if quote_token is None:
             return None
         usdc_address, usdc_decimals = quote_token
@@ -190,7 +213,7 @@ class TradeSimulator:
             input_amount_raw=str(raw_in),
             output_token=market.pt_address,
             output_amount_raw=raw_out,
-            output_amount_usd=pt_amount * (market.accounting_asset_price_usd or 1.0),
+            output_amount_usd=self._pt_mark_usd(market, pt_amount),
             fee_usd=fee,
             price_impact=impact,
             effective_apy=effective_apy,
@@ -201,7 +224,7 @@ class TradeSimulator:
         """Quote the exact scanner exit: PT -> USDC."""
         if not market.pt_address:
             return None
-        quote_token = self._quote_token(market.chain_id)
+        quote_token = await self._quote_token(market.chain_id)
         if quote_token is None:
             return None
         usdc_address, usdc_decimals = quote_token

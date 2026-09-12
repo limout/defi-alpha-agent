@@ -8,7 +8,7 @@ from .config import settings
 from .history import HistoryStore, Snapshot
 from .signals import detect_signal, _asset_price, _value_at_or_before, _return, _apy_bucket
 from .http import HttpClient
-from .sources.pendle import PendleClient
+from .sources.pendle import PendleClient, PTMarket
 from .trading import TradeSimulator
 
 
@@ -43,6 +43,57 @@ class Opportunity:
     observations: int
     days_to_expiry: float | None
     status: str
+    pt_address: str | None = None
+    pt_price_usd: float | None = None
+    quote_reason: str | None = None
+
+
+def _latest_pt_address(history: list[Snapshot]) -> tuple[str | None, Snapshot | None]:
+    for snap in reversed(history):
+        addr = (snap.pt_address or "").strip()
+        if addr.lower().startswith("0x") and len(addr) >= 42:
+            return addr, snap
+    return None, None
+
+
+def _reject_reason(history: list[Snapshot]) -> str | None:
+    """First-match filter reason. Categories match `_opportunity` + history length."""
+    if len(history) < settings.backtest_min_history:
+        return "insufficient history"
+
+    latest = None
+    for candidate in reversed(history):
+        if _asset_price(candidate) is not None:
+            latest = candidate
+            break
+    if latest is None:
+        return "missing accounting-asset price"
+    if latest.implied_apy is None:
+        return "missing APY"
+    if latest.liquidity_usd is None:
+        return "missing liquidity"
+
+    days_to_expiry = latest.days_to_expiry
+    if days_to_expiry is None and latest.expiry:
+        try:
+            expiry_dt = datetime.fromisoformat(latest.expiry.replace("Z", "+00:00"))
+            if expiry_dt.tzinfo is None:
+                expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+            days_to_expiry = max(0.0, (expiry_dt - datetime.now(timezone.utc)).total_seconds() / 86400.0)
+        except ValueError:
+            days_to_expiry = None
+    if days_to_expiry is None or not (
+        settings.alpha_min_days_to_expiry <= days_to_expiry <= settings.alpha_max_days_to_expiry
+    ):
+        return "TTM outside range"
+    if latest.liquidity_usd < settings.alpha_min_liquidity_usd:
+        return "liquidity < $1M"
+
+    window = history[-288:]
+    asset_prices = [_asset_price(x) for x in window if _asset_price(x) is not None]
+    if len(asset_prices) < 20:
+        return "insufficient canonical asset observations"
+    return None
 
 
 def _z(values: list[float], current: float | None) -> float | None:
@@ -203,6 +254,9 @@ def _opportunity(history: list[Snapshot]) -> Opportunity | None:
         observations=len(history),
         days_to_expiry=days_to_expiry,
         status=status,
+        pt_address=_latest_pt_address(history)[0],
+        pt_price_usd=latest.pt_price,
+        quote_reason=None,
     )
 
 
@@ -306,37 +360,54 @@ def _quote_age_minutes(quote: dict | None) -> float | None:
         return None
 
 
-async def _refresh_real_quotes(rows: list[Opportunity], store: HistoryStore) -> None:
-    """Refresh a small bounded set of real round-trip quotes.
+def _quote_is_fresh(quote: dict | None) -> bool:
+    if not quote or quote.get("status") != "QUOTED" or quote.get("cost_usd") is None:
+        return False
+    if not str(quote.get("reason") or "").startswith("USDC -> PT -> USDC"):
+        return False
+    age = _quote_age_minutes(quote)
+    return age is not None and age <= settings.quote_cache_ttl_minutes
 
-    The scanner never quotes the whole universe. Only the top five rows whose
-    cached quote is missing or older than 15 minutes are refreshed. Results are
-    persisted so repeated opportunities runs do not hammer Pendle.
+
+def _ptmarket_from_row(row: Opportunity) -> PTMarket | None:
+    if not row.pt_address:
+        return None
+    return PTMarket(
+        chain_id=row.chain_id,
+        market_address=row.market,
+        pt_address=row.pt_address,
+        name=row.name,
+        expiry="",
+        implied_apy=row.apy,
+        pt_price_usd=row.pt_price_usd,
+        liquidity_usd=row.liquidity,
+    )
+
+
+async def _refresh_real_quotes(rows: list[Opportunity], store: HistoryStore) -> None:
+    """Refresh at most five stale/missing Convert quotes using Neon PT addresses.
+
+    Does not rediscover the Pendle market universe. Convert remains live.
     """
     http = HttpClient()
     pendle = PendleClient(http)
     simulator = TradeSimulator(pendle)
     try:
-        markets, _ = await pendle.all_markets(
-            settings.chain_id,
-            chain_ids=settings.chain_ids(),
-            min_liquidity_usd=0.0,
-        )
-        by_key = {(m.market_address.lower(), m.chain_id): m for m in markets}
         refreshed = 0
         for row in rows:
+            if not row.pt_address:
+                row.quote_status = "NO_PT"
+                row.quote_reason = "no PT address in Neon snapshots"
+                continue
             cached = store.get_quote(row.market)
-            age = _quote_age_minutes(cached)
-            if (
-                age is not None
-                and age < 15.0
-                and str(cached.get("reason") or "").startswith("USDC -> PT -> USDC")
-            ):
+            if _quote_is_fresh(cached):
                 continue
             if refreshed >= 5:
-                break
-            market = by_key.get((row.market.lower(), row.chain_id))
+                continue
+            market = _ptmarket_from_row(row)
             if market is None:
+                row.quote_status = "NO_PT"
+                row.quote_reason = "no PT address in Neon snapshots"
                 continue
             try:
                 quote = await simulator.round_trip(market, settings.paper_capital_usd)
@@ -374,24 +445,63 @@ async def _refresh_real_quotes(rows: list[Opportunity], store: HistoryStore) -> 
 
 
 def _apply_cached_quotes(rows: list[Opportunity], store: HistoryStore) -> None:
+    ttl = settings.quote_cache_ttl_minutes
     for row in rows:
-        quote = store.get_quote(row.market)
-        if not quote or quote.get("status") != "QUOTED" or quote.get("cost_usd") is None:
-            row.quote_status = quote.get("status", "UNQUOTED") if quote else "UNQUOTED"
-            row.quote_age_min = _quote_age_minutes(quote)
+        if row.quote_status == "NO_PT":
             continue
-        row.quote_cost = float(quote["cost_usd"])
-        row.cost_pnl = row.quote_cost
-        row.model_pnl = row.gross_pnl - row.quote_cost
-        row.model_net = row.model_pnl / settings.paper_capital_usd if settings.paper_capital_usd else 0.0
-        if row.model_pnl > 0 and row.model_net >= settings.alpha_min_net_return:
-            row.status = "ACTIONABLE"
-        else:
-            row.status = "FILTERED"
-        row.quote_fee = quote.get("fees_usd")
-        row.quote_impact = quote.get("price_impact")
-        row.quote_status = "QUOTED"
-        row.quote_age_min = _quote_age_minutes(quote)
+        quote = store.get_quote(row.market)
+        age = _quote_age_minutes(quote)
+        row.quote_age_min = age
+        if quote:
+            row.quote_reason = quote.get("reason")
+        if _quote_is_fresh(quote):
+            row.quote_cost = float(quote["cost_usd"])
+            row.cost_pnl = row.quote_cost
+            row.model_pnl = row.gross_pnl - row.quote_cost
+            row.model_net = row.model_pnl / settings.paper_capital_usd if settings.paper_capital_usd else 0.0
+            if row.model_pnl > 0 and row.model_net >= settings.alpha_min_net_return:
+                row.status = "ACTIONABLE"
+            else:
+                row.status = "FILTERED"
+            row.quote_fee = quote.get("fees_usd")
+            row.quote_impact = quote.get("price_impact")
+            row.quote_status = "QUOTED"
+            continue
+        if quote and quote.get("status") == "QUOTED":
+            row.quote_status = "STALE"
+            row.quote_reason = f"quote older than {ttl}m"
+            continue
+        if quote:
+            row.quote_status = str(quote.get("status") or "UNQUOTED")
+        elif row.quote_status != "NO_PT":
+            row.quote_status = "UNQUOTED"
+
+
+def _print_rejection_summary(counts: dict[str, int], scanned: int, rejected: int) -> None:
+    print(f"scanned={scanned} rejected={rejected}")
+    print("Rejected:")
+    order = (
+        "insufficient history",
+        "missing accounting-asset price",
+        "missing APY",
+        "missing liquidity",
+        "liquidity < $1M",
+        "TTM outside range",
+        "insufficient canonical asset observations",
+        "missing PT address",
+    )
+    shown = False
+    for key in order:
+        n = counts.get(key, 0)
+        if not n:
+            continue
+        shown = True
+        print(f"  {key:<44} {n}")
+    if not shown:
+        print("  (none)")
+    missing_pt = counts.get("missing PT address", 0)
+    if missing_pt:
+        print("  (missing PT address: passed filters, listed, cannot quote until collected)")
 
 
 async def show_opportunities(store: HistoryStore, limit: int = 15) -> None:
@@ -399,15 +509,26 @@ async def show_opportunities(store: HistoryStore, limit: int = 15) -> None:
     rows: list[Opportunity] = []
     scanned = 0
     rejected = 0
+    reject_counts: dict[str, int] = {}
 
     for market in store.markets():
         scanned += 1
         history = store.recent(market, 500)
-        row = _opportunity(history)
-        if row and row.observations >= settings.backtest_min_history:
-            rows.append(row)
-        else:
+        reason = _reject_reason(history)
+        if reason:
             rejected += 1
+            reject_counts[reason] = reject_counts.get(reason, 0) + 1
+            continue
+        row = _opportunity(history)
+        if row is None:
+            rejected += 1
+            reject_counts["missing accounting-asset price"] = (
+                reject_counts.get("missing accounting-asset price", 0) + 1
+            )
+            continue
+        if not row.pt_address:
+            reject_counts["missing PT address"] = reject_counts.get("missing PT address", 0) + 1
+        rows.append(row)
 
     rows.sort(
         key=lambda x: (
@@ -420,13 +541,11 @@ async def show_opportunities(store: HistoryStore, limit: int = 15) -> None:
     rows = rows[:limit]
 
     print("\n=== CURRENT OPPORTUNITIES / NEAR MISSES ===")
+    _print_rejection_summary(reject_counts, scanned, rejected)
     if not rows:
-        print(f"No usable opportunities: scanned={scanned}, rejected={rejected}.")
-        print("Run `python -m app collect` only if the history count itself is stale; otherwise this is a valuation/TTM/liquidity rejection and should be debugged from the next lines.")
+        print("No usable opportunities after filters. Filters were not loosened.")
         return
 
-    # Real quotes are expensive. Refresh at most five stale/missing rows, then
-    # use the persisted quote cache for the table. Never fabricate a cost.
     await _refresh_real_quotes(rows, store)
     _apply_cached_quotes(rows, store)
 
@@ -441,8 +560,9 @@ async def show_opportunities(store: HistoryStore, limit: int = 15) -> None:
 
     for i, x in enumerate(rows, 1):
         rz = f"{x.residual_z:+.2f}" if x.residual_z is not None else "n/a"
-        cost = f"${x.cost_pnl:7.2f}" if x.quote_status == "QUOTED" else "    n/a"
-        net = f"${x.model_pnl:+9.2f}" if x.quote_status == "QUOTED" else "      n/a"
+        quoted = x.quote_status == "QUOTED"
+        cost = f"${x.cost_pnl:7.2f}" if quoted else "    n/a"
+        net = f"${x.model_pnl:+9.2f}" if quoted else "      n/a"
         print(
             f"{i:>4} {x.side:<4} {x.name[:30]:30} {x.apy:6.2%} {rz:>7} "
             f"{x.distance:7.2%} ${x.gross_pnl:+9.2f} {cost} {net} "
@@ -467,10 +587,15 @@ async def show_opportunities(store: HistoryStore, limit: int = 15) -> None:
                 quote_detail.append("impact n/a (aggregator route)")
             if x.quote_age_min is not None:
                 quote_detail.append(f"quote age {x.quote_age_min:.0f}m")
+        elif x.quote_status == "STALE":
+            age = f"{x.quote_age_min:.0f}m" if x.quote_age_min is not None else "unknown"
+            quote_detail.append(f"stale quote ({age}) not used for net P&L")
+        elif x.quote_status == "NO_PT":
+            quote_detail.append("unable to quote: no PT address in Neon")
         elif x.quote_status == "ERROR":
-            quote_detail.append("real quote ERROR")
+            quote_detail.append(f"real quote ERROR: {x.quote_reason or 'unknown'}")
         else:
-            quote_detail.append("real quote pending")
+            quote_detail.append("real quote n/a")
         print(
             f"     PT/asset {x.pt_price_asset:.8f} -> {x.target_asset:.8f} "
             f"(expected move {x.expected_move:+.2%}); "
@@ -480,7 +605,7 @@ async def show_opportunities(store: HistoryStore, limit: int = 15) -> None:
     print("\nModel: PT/accounting-asset residual, 50% mean-reversion to rolling median.")
     print(
         f"Capital: ${settings.paper_capital_usd:,.2f} USDC | "
-        "execution = real USDC -> PT -> USDC Pendle Convert round-trip; "
-        "cached for 15m, max 5 refreshes per run."
+        "execution = real USDC -> PT -> USDC Pendle Convert; "
+        f"cache TTL {settings.quote_cache_ttl_minutes}m, max 5 refreshes per run."
     )
 

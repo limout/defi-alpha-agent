@@ -23,6 +23,7 @@ class Snapshot:
     price_basis: str | None = None
     source_ts: str | None = None
     collection_complete: bool = True
+    pt_address: str | None = None
 
 
 class HistoryStore:
@@ -57,6 +58,7 @@ class HistoryStore:
             "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS price_basis TEXT",
             "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS source_ts TEXT",
             "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS collection_complete BOOLEAN NOT NULL DEFAULT TRUE",
+            "ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS pt_address TEXT",
         ):
             self.conn.execute(sql)
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_market_time ON snapshots(market, timestamp)")
@@ -88,6 +90,7 @@ class HistoryStore:
                 x.price_basis,
                 x.source_ts or x.timestamp,
                 x.collection_complete,
+                x.pt_address,
             )
             for x in snapshots
         ]
@@ -98,8 +101,8 @@ class HistoryStore:
         cur.executemany(
             """
             INSERT INTO snapshots
-            (timestamp, market, name, pt_price, implied_apy, liquidity_usd, expiry, chain_id, underlying_price_usd, pt_price_asset, days_to_expiry, underlying_id, accounting_asset_id, price_basis, source_ts, collection_complete)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (timestamp, market, name, pt_price, implied_apy, liquidity_usd, expiry, chain_id, underlying_price_usd, pt_price_asset, days_to_expiry, underlying_id, accounting_asset_id, price_basis, source_ts, collection_complete, pt_address)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (timestamp, market) DO NOTHING
             """, rows)
         inserted = cur.rowcount
@@ -110,7 +113,7 @@ class HistoryStore:
         rows = self.conn.execute(
             """SELECT timestamp, market, name, pt_price, implied_apy, liquidity_usd, expiry, chain_id,
                        underlying_price_usd, pt_price_asset, days_to_expiry, underlying_id, accounting_asset_id,
-                       price_basis, source_ts, collection_complete
+                       price_basis, source_ts, collection_complete, pt_address
                 FROM snapshots WHERE market = %s ORDER BY timestamp DESC LIMIT %s""",
             (market, limit),
         ).fetchall()

@@ -54,6 +54,7 @@ async def collect_once(http: HttpClient, store: HistoryStore):
             price_basis=m.valuation_basis,
             source_ts=timestamp,
             collection_complete=not diagnostics.get("page_errors"),
+            pt_address=m.pt_address,
         )
         for m in markets
     ]

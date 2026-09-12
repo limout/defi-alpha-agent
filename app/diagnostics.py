@@ -91,7 +91,7 @@ def print_states(states, top_n: int = 25) -> None:
         return
     for s in states[:top_n]:
         def pct(v): return "n/a" if v is None else f"{v:+.2%}"
-        z = "n/a" if s.apy_z is None else f"{s.apy_z:+.2f}σ"
+        z = "n/a" if s.apy_z is None else f"{s.apy_z:+.2f}sd"
         apy = "n/a" if s.apy is None else f"{s.apy:.2%}"
         pt = "n/a" if s.pt_price_asset is None else f"{s.pt_price_asset:.8f}"
         liq = "n/a" if s.liquidity_usd is None else f"${s.liquidity_usd:,.0f}"
