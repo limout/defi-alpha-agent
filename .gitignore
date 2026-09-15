@@ -2,7 +2,6 @@
 __pycache__/
 *.pyc
 .env
-data/*.sqlite3
-data/snapshots/*.json
-data/alpha_signals/*.json
+data/
 *.egg-info/
+Defi Agent.code-workspace
