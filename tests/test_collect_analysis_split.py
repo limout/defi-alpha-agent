@@ -4,6 +4,7 @@ import inspect
 import os
 import textwrap
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("DATABASE_URL", "postgresql://user:pass@localhost/db")
@@ -126,6 +127,31 @@ class CollectAnalysisSplitTest(unittest.TestCase):
         self.assertIn("run_collect()", source)
         self.assertIn('args.command == "collect"', source)
         self.assertNotIn('in ("alpha", "collect")', source)
+        self.assertIn('default="alpha"', source)
+
+    def test_production_entrypoint_is_collect(self):
+        procfile = Path(__file__).resolve().parents[1] / "Procfile"
+        self.assertTrue(procfile.is_file(), "Cloud Run source deploys need a Procfile")
+        lines = [
+            line.strip()
+            for line in procfile.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        self.assertEqual(lines, ["web: python -m app collect"])
+
+    def test_alpha_path_does_not_insert(self):
+        from app.alpha import run_once
+
+        src = inspect.getsource(main)
+        collect_idx = src.index('args.command == "collect"')
+        alpha_idx = src.index('args.command == "alpha"')
+        self.assertLess(collect_idx, alpha_idx)
+        self.assertIn("run_collect()", src[collect_idx:alpha_idx])
+        self.assertIn("run_once()", src[alpha_idx:])
+        once_src = inspect.getsource(run_once)
+        self.assertNotIn("run_collect", once_src)
+        self.assertNotIn("collect_once", once_src)
+        self.assertIn("load_histories", once_src)
 
 
 if __name__ == "__main__":
