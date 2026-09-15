@@ -8,6 +8,10 @@ from typing import Sequence
 
 from .history import Snapshot
 
+# Bar window used by detect_signal / diagnostics / opportunities (history[-288:]).
+# 4h confirmation lookbacks fit inside this window at 15-minute (and faster) cadence.
+SIGNAL_HISTORY_BARS = 288
+
 
 @dataclass
 class Signal:

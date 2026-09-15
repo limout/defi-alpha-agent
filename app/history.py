@@ -112,6 +112,10 @@ class HistoryStore:
         self.conn.commit()
         return max(0, int(inserted))
 
+    def recent_many(self, markets: Iterable[str], limit: int) -> dict[str, list[Snapshot]]:
+        """Fetch each market's recent history once. Analysis-only; not used by collect."""
+        return {market: self.recent(market, limit) for market in markets}
+
     def recent(self, market: str, limit: int = 500) -> list[Snapshot]:
         rows = self.conn.execute(
             """SELECT timestamp, market, name, pt_price, implied_apy, liquidity_usd, expiry, chain_id,

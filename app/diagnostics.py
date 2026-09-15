@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from statistics import mean, median, pstdev
 
-from .history import HistoryStore, Snapshot
+from .history import Snapshot
 
 
 @dataclass
@@ -48,10 +48,10 @@ def _ret(a: float | None, b: float | None) -> float | None:
     return None if a is None or b in (None, 0) else a / b - 1
 
 
-def build_states(markets, store: HistoryStore) -> list[MarketState]:
+def build_states(markets, histories: dict[str, list[Snapshot]]) -> list[MarketState]:
     out: list[MarketState] = []
     for market in markets:
-        h = store.recent(market.market_address, 500)
+        h = histories.get(market.market_address) or []
         latest = h[-1] if h else None
         p1, p4 = _at(h, 60), _at(h, 240)
         apys = [x.implied_apy for x in h[-288:] if x.implied_apy is not None]

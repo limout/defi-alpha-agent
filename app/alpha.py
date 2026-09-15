@@ -11,7 +11,7 @@ from .history import HistoryStore, Snapshot
 from .http import HttpClient
 from .paper import PaperLedger
 from .diagnostics import build_states, print_states
-from .signals import Signal, detect_signal
+from .signals import SIGNAL_HISTORY_BARS, Signal, detect_signal
 from .sources.pendle import PendleClient
 from .trading import TradeSimulator
 
@@ -63,10 +63,14 @@ async def collect_once(http: HttpClient, store: HistoryStore):
     return markets, {**diagnostics, "snapshots_inserted": inserted}
 
 
-def evaluate(markets, store):
+def load_histories(markets, store: HistoryStore) -> dict[str, list[Snapshot]]:
+    return store.recent_many((m.market_address for m in markets), SIGNAL_HISTORY_BARS)
+
+
+def evaluate(markets, histories: dict[str, list[Snapshot]]):
     signals = []
     for market in markets:
-        history = store.recent(market.market_address, 500)
+        history = histories.get(market.market_address) or []
         signal = detect_signal(
             history, settings.paper_capital_usd, settings.alpha_min_liquidity_usd,
             settings.alpha_round_trip_cost, settings.alpha_min_net_return,
@@ -197,23 +201,44 @@ async def mark_paper_positions(markets, ledger, pendle):
         print(f"CLOSED #{trade.id} {trade.name}: {reason} PnL=${pnl:+.2f} ({ret:+.2%})")
 
 
-async def run_once():
-    http = HttpClient(); store = HistoryStore(database_url=settings.database_url); ledger = PaperLedger(database_url=settings.database_url)
+async def run_collect():
+    """15-minute production path: Pendle fetch + INSERT only. No history scans."""
+    http = HttpClient()
+    store = HistoryStore(database_url=settings.database_url)
     try:
-        print("\n=== DEFI ALPHA AGENT v0.6.20 ===")
-        print("SHORT-HORIZON / PAPER MODE / REAL PENDLE QUOTES")
-        print("No wallet. No approvals. No transactions.\n")
-        pendle = PendleClient(http)
+        print("\n=== DEFI ALPHA COLLECT ===")
+        print("Snapshot insert only. No history scan, no signals, no quotes.\n")
         markets, diagnostics = await collect_once(http, store)
         print("=== COLLECTION ===")
         print(json.dumps(diagnostics, indent=2))
         print(f"Markets stored: {len(markets)}")
         if diagnostics.get("page_errors"):
             print(f"WARNING: collection stopped after page error: {diagnostics['page_errors']}")
-        print(f"History: {store.count()} snapshots / {len({m.market_address for m in markets if store.count(m.market_address)})} markets")
-        print_states(build_states(markets, store), settings.diagnostic_top_n)
+        print(f"History snapshots: {store.count()}")
+        print(f"History DB: {store.info()}")
+    finally:
+        store.close()
+        await http.close()
+
+
+async def run_once():
+    """Manual analysis: live Pendle metadata + one history fetch per market. No INSERT."""
+    http = HttpClient(); store = HistoryStore(database_url=settings.database_url); ledger = PaperLedger(database_url=settings.database_url)
+    try:
+        print("\n=== DEFI ALPHA AGENT v0.6.20 ===")
+        print("SHORT-HORIZON / PAPER MODE / REAL PENDLE QUOTES")
+        print("Analysis only (no snapshot insert). No wallet. No approvals. No transactions.\n")
+        pendle = PendleClient(http)
+        markets, diagnostics = await pendle.all_markets(settings.chain_id, chain_ids=settings.chain_ids(), min_liquidity_usd=0.0)
+        print("=== MARKETS ===")
+        print(json.dumps(diagnostics, indent=2))
+        print(f"Markets loaded: {len(markets)}")
+        if diagnostics.get("page_errors"):
+            print(f"WARNING: market fetch stopped after page error: {diagnostics['page_errors']}")
+        histories = load_histories(markets, store)
+        print_states(build_states(markets, histories), settings.diagnostic_top_n)
         await mark_paper_positions(markets, ledger, pendle)
-        signals = evaluate(markets, store)
+        signals = evaluate(markets, histories)
         print_signals(signals)
         await simulate_candidates(markets, signals, pendle, ledger)
         write_signal_snapshot(signals)
@@ -225,27 +250,21 @@ async def run_once():
 
 
 async def run_daemon():
-    http = HttpClient(); store = HistoryStore(database_url=settings.database_url); ledger = PaperLedger(database_url=settings.database_url)
+    http = HttpClient(); store = HistoryStore(database_url=settings.database_url)
     try:
         print("\n=== DEFI ALPHA AGENT v0.6.20 DAEMON ===")
-        print(f"Polling every {settings.poll_interval_seconds}s")
-        print("PAPER MODE ONLY / REAL PENDLE QUOTES FOR CANDIDATES\n")
+        print(f"Collecting every {settings.poll_interval_seconds}s (insert only)")
+        print("PAPER MODE / ANALYSIS IS A SEPARATE COMMAND\n")
         while True:
             started = datetime.now(timezone.utc)
             try:
-                pendle = PendleClient(http)
                 markets, diagnostics = await collect_once(http, store)
-                await mark_paper_positions(markets, ledger, pendle)
-                signals = evaluate(markets, store)
-                print(f"\n[{started.isoformat()}] stored={diagnostics['snapshots_inserted']}")
-                print_states(build_states(markets, store), settings.diagnostic_top_n)
-                print_signals(signals)
-                await simulate_candidates(markets, signals, pendle, ledger)
-                print(f"Paper summary: {ledger.summary()}")
-                write_signal_snapshot(signals)
+                print(f"\n[{started.isoformat()}] stored={diagnostics['snapshots_inserted']} markets={len(markets)}")
+                if diagnostics.get("page_errors"):
+                    print(f"WARNING: collection stopped after page error: {diagnostics['page_errors']}")
             except Exception as exc:
                 print(f"Collection error: {type(exc).__name__}: {exc}")
             elapsed = (datetime.now(timezone.utc) - started).total_seconds()
             await asyncio.sleep(max(5, settings.poll_interval_seconds - elapsed))
     finally:
-        ledger.close(); store.close(); await http.close()
+        store.close(); await http.close()

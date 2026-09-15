@@ -1,6 +1,6 @@
 import asyncio
 
-from .alpha import run_daemon, run_once
+from .alpha import run_collect, run_daemon, run_once
 from .carry import main_async as carry_main_async
 from .backtest import run_backtest, print_report
 from .config import settings
@@ -20,11 +20,13 @@ def main():
         nargs="?",
         default="alpha",
         choices=("alpha", "collect", "daemon", "carry", "backtest", "preflight", "dbcheck", "signals", "opportunities", "lp"),
-        help="alpha=signal scan, collect=one data collection, daemon=continuous scan, carry=legacy PT/Morpho scanner, backtest=local historical replay, preflight=one read-only Pendle two-sided quote test, dbcheck=database check, signals=historical signal episodes, opportunities=current near-misses, lp=LP APY spike research",
+        help="alpha=signal scan (no insert), collect=one snapshot insert, daemon=continuous insert, carry=legacy PT/Morpho scanner, backtest=local historical replay, preflight=one read-only Pendle two-sided quote test, dbcheck=database check, signals=historical signal episodes, opportunities=current near-misses, lp=LP APY spike research",
     )
     args = parser.parse_args()
 
-    if args.command in ("alpha", "collect"):
+    if args.command == "collect":
+        asyncio.run(run_collect())
+    elif args.command == "alpha":
         asyncio.run(run_once())
     elif args.command == "daemon":
         asyncio.run(run_daemon())

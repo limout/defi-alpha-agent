@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from .config import settings
 from .history import HistoryStore, Snapshot
-from .signals import detect_signal, _asset_price, _value_at_or_before, _return, _apy_bucket
+from .signals import SIGNAL_HISTORY_BARS, detect_signal, _asset_price, _value_at_or_before, _return, _apy_bucket
 from .http import HttpClient
 from .sources.pendle import PendleClient, PTMarket
 from .trading import TradeSimulator
@@ -513,7 +513,7 @@ async def show_opportunities(store: HistoryStore, limit: int = 15) -> None:
 
     for market in store.markets():
         scanned += 1
-        history = store.recent(market, 500)
+        history = store.recent(market, SIGNAL_HISTORY_BARS)
         reason = _reject_reason(history)
         if reason:
             rejected += 1
