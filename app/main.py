@@ -5,6 +5,7 @@ from .carry import main_async as carry_main_async
 from .backtest import run_backtest, print_report
 from .config import settings
 from .history import HistoryStore
+from .lp import run_lp
 from .preflight import run_preflight
 from .paper import PaperLedger
 from .monitor import show_signal_history, show_opportunities
@@ -18,8 +19,8 @@ def main():
         "command",
         nargs="?",
         default="alpha",
-        choices=("alpha", "collect", "daemon", "carry", "backtest", "preflight", "dbcheck", "signals", "opportunities"),
-        help="alpha=signal scan, collect=one data collection, daemon=continuous scan, carry=legacy PT/Morpho scanner, backtest=local historical replay, preflight=one read-only Pendle two-sided quote test, dbcheck=database check, signals=historical signal episodes, opportunities=current near-misses",
+        choices=("alpha", "collect", "daemon", "carry", "backtest", "preflight", "dbcheck", "signals", "opportunities", "lp"),
+        help="alpha=signal scan, collect=one data collection, daemon=continuous scan, carry=legacy PT/Morpho scanner, backtest=local historical replay, preflight=one read-only Pendle two-sided quote test, dbcheck=database check, signals=historical signal episodes, opportunities=current near-misses, lp=LP APY spike research",
     )
     args = parser.parse_args()
 
@@ -56,5 +57,11 @@ def main():
                 show_signal_history(store)
             else:
                 asyncio.run(show_opportunities(store))
+        finally:
+            store.close()
+    elif args.command == "lp":
+        store = HistoryStore(database_url=settings.database_url)
+        try:
+            run_lp(store)
         finally:
             store.close()

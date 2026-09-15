@@ -67,6 +67,7 @@ class PTMarket:
     pt_to_underlying_token_rate: float | None = None
     underlying_decimals: int | None = None
     underlying_price_usd: float | None = None
+    lp_apy: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -491,16 +492,48 @@ class PendleClient:
             )
 
         for candidate in candidates:
-            value = PendleClient._extract_number(candidate)
+            value = PendleClient._normalize_apy_value(candidate)
+            if value is not None:
+                return value
 
-            if value is None:
-                continue
+        return None
 
-            if value > 5:
-                value /= 100
+    @staticmethod
+    def _normalize_apy_value(value: Any) -> float | None:
+        """Store APY as a decimal, matching implied_apy (0.14 = 14%).
 
-            return value
+        Pendle sometimes emits a percent (>5). Values already in decimal
+        form (typical aggregatedApy / impliedApy) are kept as-is.
+        """
+        number = PendleClient._extract_number(value)
+        if number is None:
+            return None
+        if number > 5:
+            number /= 100
+        return number
 
+    @staticmethod
+    def _extract_lp_apy(market: dict[str, Any]) -> float | None:
+        """LP APY from the bulk /v2/markets/all payload (no extra HTTP).
+
+        Pendle exposes this as details.aggregatedApy (pool/LP APY), not
+        impliedApy (PT).
+        """
+        candidates: list[Any] = [
+            market.get("aggregatedApy"),
+            market.get("aggregatedAPY"),
+        ]
+        details = market.get("details")
+        if isinstance(details, dict):
+            candidates = [
+                details.get("aggregatedApy"),
+                details.get("aggregatedAPY"),
+                *candidates,
+            ]
+        for candidate in candidates:
+            value = PendleClient._normalize_apy_value(candidate)
+            if value is not None:
+                return value
         return None
 
     async def _fetch_asset_prices(self, asset_ids: list[str]) -> dict[str, float]:
@@ -1183,6 +1216,7 @@ class PendleClient:
                     or self._extract_token_decimals(market, "underlyingAsset")
                     or (asset_decimals.get(underlying_asset_id) if underlying_asset_id else None)
                 ),
+                lp_apy=self._extract_lp_apy(market),
             )
 
             result.append(item)
