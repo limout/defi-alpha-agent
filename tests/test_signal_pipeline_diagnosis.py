@@ -15,7 +15,16 @@ from unittest.mock import MagicMock
 
 os.environ.setdefault("DATABASE_URL", "postgresql://user:pass@localhost/db")
 
-from app.backtest import print_report, run_backtest, unique_events
+from app.backtest import (
+    HORIZONS,
+    _report_group,
+    build_event_trajectories,
+    distance_bp,
+    print_report,
+    print_trajectory_report,
+    run_backtest,
+    unique_events,
+)
 from app.config import settings
 from app.history import Snapshot
 from app.monitor import _opportunity, show_signal_history
@@ -315,6 +324,93 @@ class WindowMismatchTest(unittest.TestCase):
         src = inspect.getsource(print_report)
         self.assertIn("Unique events (market, opened_at)", src)
         self.assertIn("four horizon observations", src)
+        self.assertNotIn("TRAJECTORY", src)
+        self.assertNotIn("mean-reversion outcome", inspect.getsource(print_report))
+
+
+class ResidualTrajectoryTest(unittest.TestCase):
+    def test_distance_bp_formula(self):
+        self.assertAlmostEqual(distance_bp(1.0, 0.99), 10000 * (1.0 / 0.99 - 1.0), places=8)
+        self.assertIsNone(distance_bp(1.0, None))
+        self.assertIsNone(distance_bp(1.0, 0.0))
+
+    def test_distance_change_is_horizon_minus_entry(self):
+        entry = 70.0
+        horizon = 40.0
+        self.assertAlmostEqual(horizon - entry, -30.0)
+
+    def test_frozen_entry_median_not_later_median(self):
+        start = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        rows = []
+        for i in range(40):
+            cheap = i >= 32
+            px = (0.9700 / 1.007) if cheap else 0.9700 + (i % 3 - 1) * 1e-6
+            apy = 0.20 if cheap else 0.10
+            rows.append(_snap(i, start=start, pt_asset=px, apy=apy))
+        for i in range(40, 40 + 96):
+            rows.append(_snap(i, start=start, pt_asset=0.9900, apy=0.12))
+
+        store = MagicMock()
+        store.markets.return_value = ["0xmarket"]
+        store.recent.return_value = rows
+        trades = run_backtest(store)
+        self.assertTrue(trades)
+        traj = build_event_trajectories(store, trades)
+        self.assertEqual(len(traj), 1)
+        row = traj[0]
+        later_median = median([x.pt_price_asset for x in rows if x.pt_price_asset])
+        self.assertNotAlmostEqual(row.ref_price, later_median, places=4)
+        h24 = next(p for p in row.horizons if p.horizon_min == 1440)
+        self.assertIsNotNone(h24.price)
+        self.assertAlmostEqual(h24.distance_bp, distance_bp(row.ref_price, h24.price), places=6)
+        rolling = distance_bp(later_median, h24.price)
+        self.assertNotAlmostEqual(h24.distance_bp, rolling, places=2)
+        self.assertAlmostEqual(
+            h24.distance_change_bp,
+            h24.distance_bp - row.entry_distance_bp,
+            places=6,
+        )
+
+    def test_missing_horizon_is_none(self):
+        start = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        rows = []
+        for i in range(40):
+            cheap = i >= 32
+            px = (0.9700 / 1.007) if cheap else 0.9700 + (i % 3 - 1) * 1e-6
+            apy = 0.20 if cheap else 0.10
+            rows.append(_snap(i, start=start, pt_asset=px, apy=apy))
+        # Only ~2h of follow-through: 1h exists, 4h/12h/24h do not.
+        for i in range(40, 48):
+            rows.append(_snap(i, start=start, pt_asset=0.9720, apy=0.12))
+        store = MagicMock()
+        store.markets.return_value = ["0xmarket"]
+        store.recent.return_value = rows
+        trades = run_backtest(store)
+        traj = build_event_trajectories(store, trades)
+        self.assertEqual(len(traj), 1)
+        by_h = {p.horizon_min: p for p in traj[0].horizons}
+        self.assertIsNotNone(by_h[60].price)
+        self.assertIsNone(by_h[240].price)
+        self.assertIsNone(by_h[240].distance_bp)
+        self.assertIsNone(by_h[240].distance_change_bp)
+        self.assertEqual([p.horizon_min for p in traj[0].horizons], list(HORIZONS))
+
+    def test_trajectory_report_is_unlabeled_diagnostic(self):
+        src = inspect.getsource(print_trajectory_report)
+        self.assertIn("distance_change_bp = horizon_distance_bp - entry_distance_bp", src)
+        self.assertIn("Diagnostic only", src)
+        self.assertNotIn("SUCCESS", src)
+        self.assertNotIn("FAILED", src)
+        self.assertNotIn("reverted", src.lower())
+
+    def test_pnl_report_body_unchanged(self):
+        src = inspect.getsource(print_report)
+        group = inspect.getsource(_report_group)
+        self.assertIn("=== FIXED-HORIZON PT/UNDERLYING BACKTEST ===", src)
+        self.assertIn("Win rate:", group)
+        self.assertIn("Total P&L:", group)
+        self.assertNotIn("distance_bp", src)
+        self.assertNotIn("distance_change_bp", src)
 
 
 class LiveFunnelTest(unittest.TestCase):

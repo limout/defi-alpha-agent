@@ -2,12 +2,18 @@ import asyncio
 
 from .alpha import run_collect, run_daemon, run_once
 from .carry import main_async as carry_main_async
-from .backtest import run_backtest, print_report
+from .backtest import (
+    build_event_trajectories,
+    print_report,
+    print_trajectory_report,
+    run_backtest,
+)
 from .config import settings
 from .history import HistoryStore
 from .lp import run_lp
 from .preflight import run_preflight
 from .paper import PaperLedger
+from .meanrev import print_meanrev_report, run_meanrev
 from .monitor import show_signal_history, show_opportunities
 
 
@@ -19,8 +25,8 @@ def main():
         "command",
         nargs="?",
         default="alpha",
-        choices=("alpha", "collect", "daemon", "carry", "backtest", "preflight", "dbcheck", "signals", "opportunities", "lp"),
-        help="alpha=signal scan (no insert), collect=one snapshot insert, daemon=continuous insert, carry=legacy PT/Morpho scanner, backtest=local historical replay, preflight=one read-only Pendle two-sided quote test, dbcheck=database check, signals=historical signal episodes, opportunities=current near-misses, lp=LP APY spike research",
+        choices=("alpha", "collect", "daemon", "carry", "backtest", "meanrev", "preflight", "dbcheck", "signals", "opportunities", "lp"),
+        help="alpha=signal scan (no insert), collect=one snapshot insert, daemon=continuous insert, carry=legacy PT/Morpho scanner, backtest=local historical replay, meanrev=research-only broad mean-reversion experiment, preflight=one read-only Pendle two-sided quote test, dbcheck=database check, signals=historical signal episodes, opportunities=current near-misses, lp=LP APY spike research",
     )
     args = parser.parse_args()
 
@@ -35,7 +41,15 @@ def main():
     elif args.command == "backtest":
         store = HistoryStore(database_url=settings.database_url)
         try:
-            print_report(run_backtest(store))
+            trades = run_backtest(store)
+            print_report(trades)
+            print_trajectory_report(build_event_trajectories(store, trades))
+        finally:
+            store.close()
+    elif args.command == "meanrev":
+        store = HistoryStore(database_url=settings.database_url)
+        try:
+            print_meanrev_report(run_meanrev(store))
         finally:
             store.close()
     elif args.command == "preflight":
