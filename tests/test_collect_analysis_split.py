@@ -14,7 +14,7 @@ from app.diagnostics import build_states
 from app.history import Snapshot
 from app.lp import EXPECTED_OBSERVATIONS
 from app.main import main
-from app.signals import SIGNAL_HISTORY_BARS
+from app.signals import BACKTEST_HISTORY_BARS, SIGNAL_HISTORY_BARS
 from app.sources.pendle import PTMarket
 
 
@@ -72,9 +72,10 @@ class RecordingStore:
 
 
 class CollectAnalysisSplitTest(unittest.TestCase):
-    def test_signal_window_is_288_not_500(self):
+    def test_signal_window_is_288_not_replay_window(self):
         self.assertEqual(SIGNAL_HISTORY_BARS, 288)
-        self.assertLess(SIGNAL_HISTORY_BARS, 500)
+        self.assertEqual(BACKTEST_HISTORY_BARS, 5000)
+        self.assertLess(SIGNAL_HISTORY_BARS, BACKTEST_HISTORY_BARS)
         self.assertGreater(SIGNAL_HISTORY_BARS, EXPECTED_OBSERVATIONS)
 
     def test_collect_functions_do_not_read_history(self):

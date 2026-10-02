@@ -78,6 +78,7 @@ def evaluate(markets, histories: dict[str, list[Snapshot]]):
             settings.underlying_adverse_1h, settings.underlying_adverse_4h,
             settings.alpha_min_days_to_expiry, settings.alpha_max_days_to_expiry,
             settings.max_snapshot_gap_minutes,
+            settings.alpha_min_price_distance,
         )
         if signal:
             signals.append(signal)

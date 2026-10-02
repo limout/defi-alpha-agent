@@ -6,7 +6,7 @@ from statistics import mean, median
 
 from .config import settings
 from .history import HistoryStore, Snapshot
-from .signals import detect_signal
+from .signals import detect_signal, BACKTEST_HISTORY_BARS
 
 
 @dataclass
@@ -59,7 +59,7 @@ def run_backtest(store: HistoryStore) -> list[BacktestTrade]:
     trades: list[BacktestTrade] = []
     horizons = (60, 240, 720, 1440)
     for market in store.markets():
-        history = store.recent(market, 5000)
+        history = store.recent(market, BACKTEST_HISTORY_BARS)
         if len(history) < settings.backtest_min_history:
             continue
         next_event_ts = None
@@ -81,6 +81,7 @@ def run_backtest(store: HistoryStore) -> list[BacktestTrade]:
                 settings.alpha_min_days_to_expiry,
                 settings.alpha_max_days_to_expiry,
                 settings.max_snapshot_gap_minutes,
+                settings.alpha_min_price_distance,
             )
             if not sig or sig.side != "BUY":
                 continue
@@ -121,15 +122,28 @@ def run_backtest(store: HistoryStore) -> list[BacktestTrade]:
     return trades
 
 
+def unique_events(trades: list[BacktestTrade]) -> list[tuple[str, str, str]]:
+    seen: set[tuple[str, str]] = set()
+    events: list[tuple[str, str, str]] = []
+    for t in trades:
+        key = (t.market, t.opened_at)
+        if key in seen:
+            continue
+        seen.add(key)
+        events.append((t.market, t.name, t.opened_at))
+    return events
+
+
 def _report_group(trades: list[BacktestTrade], horizon: int) -> None:
     group = [t for t in trades if t.horizon_min == horizon]
-    print(f"\n--- {horizon // 60 if horizon >= 60 else horizon}h ---")
+    hours = horizon // 60 if horizon >= 60 else horizon
+    print(f"\n--- {hours}h horizon observations ---")
     if not group:
         print("No completed observations.")
         return
     wins = [t for t in group if t.pnl_usd > 0]
     pnl = sum(t.pnl_usd for t in group)
-    print(f"Observations: {len(group)}")
+    print(f"Observations: {len(group)}  (one per unique event that has this horizon)")
     print(f"Win rate:    {len(wins)/len(group):.1%}")
     print(f"Mean net:    {mean(t.return_pct for t in group):+.3%}")
     print(f"Median net:  {median(t.return_pct for t in group):+.3%}")
@@ -143,6 +157,15 @@ def print_report(trades: list[BacktestTrade]) -> None:
     if not trades:
         print("No completed historical observations yet. Keep collecting history.")
         return
-    for horizon in (60, 240, 720, 1440):
+    events = unique_events(trades)
+    horizons = (60, 240, 720, 1440)
+    print(f"Unique events (market, opened_at): {len(events)}")
+    print("Each event produces up to four horizon observations: 1h, 4h, 12h, 24h.")
+    print(f"Horizon observations: {len(trades)}  (max {len(events) * len(horizons)} if every event has all four)")
+    for market, name, opened in events:
+        n_h = sum(1 for t in trades if t.market == market and t.opened_at == opened)
+        print(f"  {opened[:19].replace('T', ' ')}  {name[:30]:30}  horizons={n_h}/4")
+    for horizon in horizons:
         _report_group(trades, horizon)
-    print("\nNote: one event per market per 24h; this is still descriptive, not a significance test.")
+    print("\nNote: one event per market per 24h; horizon rows are labels of the same event, not extra samples.")
+    print("This is still descriptive, not a significance test.")

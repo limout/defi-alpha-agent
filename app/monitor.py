@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from statistics import mean, median, pstdev
+from math import log
+from statistics import median
 from datetime import datetime, timezone
 
 from .config import settings
 from .history import HistoryStore, Snapshot
-from .signals import SIGNAL_HISTORY_BARS, detect_signal, _asset_price, _value_at_or_before, _return, _apy_bucket
+from .signals import (
+    BACKTEST_HISTORY_BARS,
+    SIGNAL_HISTORY_BARS,
+    _past_canonical_prices,
+    _zscore,
+    detect_signal,
+    _asset_price,
+    _value_at_or_before,
+    _return,
+    _apy_bucket,
+)
 from .http import HttpClient
 from .sources.pendle import PendleClient, PTMarket
 from .trading import TradeSimulator
@@ -89,18 +100,29 @@ def _reject_reason(history: list[Snapshot]) -> str | None:
     if latest.liquidity_usd < settings.alpha_min_liquidity_usd:
         return "liquidity < $1M"
 
-    window = history[-288:]
+    window = history[-SIGNAL_HISTORY_BARS:]
     asset_prices = [_asset_price(x) for x in window if _asset_price(x) is not None]
     if len(asset_prices) < 20:
         return "insufficient canonical asset observations"
     return None
 
 
-def _z(values: list[float], current: float | None) -> float | None:
-    if current is None or len(values) < 20:
-        return None
-    sd = pstdev(values)
-    return 0.0 if sd == 0 else (current - mean(values)) / sd
+def _detect(history: list[Snapshot]):
+    return detect_signal(
+        history,
+        capital=settings.paper_capital_usd,
+        min_liquidity=settings.alpha_min_liquidity_usd,
+        estimated_round_trip_cost=settings.alpha_round_trip_cost,
+        min_net_return=settings.alpha_min_net_return,
+        min_price_z=settings.alpha_min_price_z,
+        min_apy_z=settings.alpha_min_apy_z,
+        underlying_adverse_1h=settings.underlying_adverse_1h,
+        underlying_adverse_4h=settings.underlying_adverse_4h,
+        min_days_to_expiry=settings.alpha_min_days_to_expiry,
+        max_days_to_expiry=settings.alpha_max_days_to_expiry,
+        max_snapshot_gap_minutes=settings.max_snapshot_gap_minutes,
+        min_price_distance=settings.alpha_min_price_distance,
+    )
 
 
 def _opportunity(history: list[Snapshot]) -> Opportunity | None:
@@ -162,67 +184,63 @@ def _opportunity(history: list[Snapshot]) -> Opportunity | None:
         p4.underlying_price_usd if p4 else None,
     )
 
-    window = history[-288:]
-    previous = window[:-1]
-
-    # Only statistics from the current valuation basis belong in the alpha
-    # sample. This also protects us if a market has a few legacy snapshots
-    # from before the accounting-asset migration.
-    # Keep the alpha sample on the explicit accounting-asset valuation basis.
-    # Do not require the raw accounting_asset_id string to be identical across
-    # every historical row: older rows may have been written before Pendle
-    # started exposing/normalizing the field consistently. The stored
-    # pt_price_asset itself is already the canonical PT/accounting-asset value.
-    asset_prices = [
-        _asset_price(x)
-        for x in window
-        if _asset_price(x) is not None
-    ]
-    if len(asset_prices) < 20:
+    window = history[-SIGNAL_HISTORY_BARS:]
+    past_prices = _past_canonical_prices(window)
+    if len(past_prices) < 20:
         return None
 
-    residual_z = _z(
-        [
-            _asset_price(x)
-            for x in previous
-            if _asset_price(x) is not None
-            and x.price_basis == latest.price_basis
-        ],
-        current,
-    )
-
+    residual_z = _zscore([log(x) for x in past_prices], log(current))
     bucket = _apy_bucket(days_to_expiry)
     bucket_apys = [
         x.implied_apy
-        for x in previous
+        for x in window[:-1]
         if x.implied_apy is not None
-        and x.accounting_asset_id == latest.accounting_asset_id
         and _apy_bucket(x.days_to_expiry) == bucket
     ]
-    apy_z = _z(bucket_apys, latest.implied_apy)
+    apy_z = _zscore(bucket_apys, latest.implied_apy)
 
-    ref_asset = median(asset_prices)
+    ref_asset = median(past_prices)
     side = "BUY" if current < ref_asset else "SELL"
     distance = abs(ref_asset / current - 1.0)
 
-    # Show the same economics as detect_signal: only 50% of the historical
-    # displacement is assumed to mean-revert, in PT/accounting asset units.
+    # Same 50% retracement economics as detect_signal.
     target_asset = current + (ref_asset - current) * 0.50
     expected_move = abs(target_asset / current - 1.0)
     gross = expected_move
-    # Cost is populated later from a real two-sided Pendle Convert quote.
-    # Keep the conservative configured estimate only as a pre-quote fallback.
     model_net = gross - settings.alpha_round_trip_cost
     gross_pnl = settings.paper_capital_usd * gross
     cost_pnl = settings.paper_capital_usd * settings.alpha_round_trip_cost
     model_pnl = settings.paper_capital_usd * model_net
 
-    status = "WARMUP"
-    if len(history) >= settings.backtest_min_history:
-        if residual_z is not None and abs(residual_z) >= settings.alpha_min_price_z * 0.6 and model_net > 0:
-            status = "NEAR"
-        else:
-            status = "FILTERED"
+    signal = _detect(history)
+    if signal is not None:
+        status = "VALIDATED"
+        side = signal.side
+        residual_z = signal.price_z
+        apy_z = signal.apy_z
+        distance = signal.distance_to_median
+        target_asset = signal.target
+        expected_move = signal.gross_return
+        gross = signal.gross_return
+        model_net = signal.expected_net_return
+        gross_pnl = settings.paper_capital_usd * gross
+        cost_pnl = settings.paper_capital_usd * signal.estimated_cost
+        model_pnl = signal.expected_net_pnl
+        r1 = signal.price_return_1h
+        r4 = signal.price_return_4h
+        ur1 = signal.underlying_return_1h
+        ur4 = signal.underlying_return_4h
+    elif len(history) < settings.backtest_min_history:
+        status = "WARMUP"
+    elif (
+        residual_z is not None
+        and abs(residual_z) >= settings.alpha_min_price_z * 0.6
+        and distance >= settings.alpha_min_price_distance
+        and model_net > 0
+    ):
+        status = "NEAR"
+    else:
+        status = "FILTERED"
 
     return Opportunity(
         market=latest.market,
@@ -265,27 +283,14 @@ def show_signal_history(store: HistoryStore, limit: int = 30) -> None:
     episodes: list[dict] = []
 
     for market in store.markets():
-        history = store.recent(market, 500)
+        history = store.recent(market, BACKTEST_HISTORY_BARS)
         if len(history) < 24:
             continue
 
         previous_key = None
         for idx in range(24, len(history) + 1):
             prefix = history[:idx]
-            signal = detect_signal(
-                prefix,
-                capital=settings.paper_capital_usd,
-                min_liquidity=settings.alpha_min_liquidity_usd,
-                estimated_round_trip_cost=settings.alpha_round_trip_cost,
-                min_net_return=settings.alpha_min_net_return,
-                min_price_z=settings.alpha_min_price_z,
-                min_apy_z=settings.alpha_min_apy_z,
-                underlying_adverse_1h=settings.underlying_adverse_1h,
-                underlying_adverse_4h=settings.underlying_adverse_4h,
-                min_days_to_expiry=settings.alpha_min_days_to_expiry,
-                max_days_to_expiry=settings.alpha_max_days_to_expiry,
-                max_snapshot_gap_minutes=settings.max_snapshot_gap_minutes,
-            )
+            signal = _detect(prefix)
             if signal is None:
                 previous_key = None
                 continue
@@ -318,7 +323,10 @@ def show_signal_history(store: HistoryStore, limit: int = 30) -> None:
     episodes.sort(key=lambda x: x["timestamp"], reverse=True)
 
     print("\n=== SIGNAL HISTORY ===")
-    print("Reconstructed from stored snapshots; consecutive identical signals are collapsed.")
+    print(
+        f"Reconstructed from stored snapshots (last {BACKTEST_HISTORY_BARS} bars, "
+        "same window as backtest); consecutive identical signals are collapsed."
+    )
     if not episodes:
         print("No validated statistical signals found in the available history.")
         return
@@ -449,6 +457,7 @@ def _apply_cached_quotes(rows: list[Opportunity], store: HistoryStore) -> None:
     for row in rows:
         if row.quote_status == "NO_PT":
             continue
+        statistical = row.status
         quote = store.get_quote(row.market)
         age = _quote_age_minutes(quote)
         row.quote_age_min = age
@@ -459,13 +468,13 @@ def _apply_cached_quotes(rows: list[Opportunity], store: HistoryStore) -> None:
             row.cost_pnl = row.quote_cost
             row.model_pnl = row.gross_pnl - row.quote_cost
             row.model_net = row.model_pnl / settings.paper_capital_usd if settings.paper_capital_usd else 0.0
-            if row.model_pnl > 0 and row.model_net >= settings.alpha_min_net_return:
-                row.status = "ACTIONABLE"
-            else:
-                row.status = "FILTERED"
             row.quote_fee = quote.get("fees_usd")
             row.quote_impact = quote.get("price_impact")
             row.quote_status = "QUOTED"
+            if statistical == "VALIDATED" and row.model_pnl > 0 and row.model_net >= settings.alpha_min_net_return:
+                row.status = "ACTIONABLE"
+            else:
+                row.status = statistical
             continue
         if quote and quote.get("status") == "QUOTED":
             row.quote_status = "STALE"
@@ -532,22 +541,36 @@ async def show_opportunities(store: HistoryStore, limit: int = 15) -> None:
 
     rows.sort(
         key=lambda x: (
+            0 if x.status == "VALIDATED" else 1 if x.status == "NEAR" else 2,
             x.gross,
             abs(x.residual_z) if x.residual_z is not None else -1,
             x.distance,
         ),
-        reverse=True,
+        reverse=False,
     )
-    rows = rows[:limit]
+    # After grouping by status, sort each group by gross descending.
+    validated = [x for x in rows if x.status == "VALIDATED"]
+    near = [x for x in rows if x.status == "NEAR"]
+    filtered = [x for x in rows if x.status == "FILTERED"]
+    warmup = [x for x in rows if x.status == "WARMUP"]
+    validated.sort(key=lambda x: x.gross, reverse=True)
+    near.sort(key=lambda x: x.gross, reverse=True)
 
-    print("\n=== CURRENT OPPORTUNITIES / NEAR MISSES ===")
+    displayed = (validated + near)[:limit]
+
+    print("\n=== CURRENT OPPORTUNITIES ===")
     _print_rejection_summary(reject_counts, scanned, rejected)
-    if not rows:
-        print("No usable opportunities after filters. Filters were not loosened.")
+    print(
+        f"detect_signal VALIDATED={len(validated)}  NEAR={len(near)}  "
+        f"FILTERED={len(filtered)}  WARMUP={len(warmup)}"
+    )
+    print("VALIDATED = canonical detect_signal(). NEAR = weaker z / no APY gate. FILTERED omitted from table.")
+    if not displayed:
+        print("No VALIDATED or NEAR candidates after filters. Filters were not loosened.")
         return
 
-    await _refresh_real_quotes(rows, store)
-    _apply_cached_quotes(rows, store)
+    await _refresh_real_quotes(displayed, store)
+    _apply_cached_quotes(displayed, store)
 
     print(
         "rank side market                         APY     RZ      resid    "
@@ -558,7 +581,7 @@ async def show_opportunities(store: HistoryStore, limit: int = 15) -> None:
         "----------- --------- ----------- --------- --- --------"
     )
 
-    for i, x in enumerate(rows, 1):
+    for i, x in enumerate(displayed, 1):
         rz = f"{x.residual_z:+.2f}" if x.residual_z is not None else "n/a"
         quoted = x.quote_status == "QUOTED"
         cost = f"${x.cost_pnl:7.2f}" if quoted else "    n/a"
@@ -602,9 +625,11 @@ async def show_opportunities(store: HistoryStore, limit: int = 15) -> None:
             + ", ".join(detail + quote_detail)
         )
 
-    print("\nModel: PT/accounting-asset residual, 50% mean-reversion to rolling median.")
+    print("\nModel: canonical detect_signal() for VALIDATED; past-only median/z; 50% retracement.")
     print(
         f"Capital: ${settings.paper_capital_usd:,.2f} USDC | "
+        f"min distance {settings.alpha_min_price_distance * 10_000:.0f}bp diagnostic "
+        f"(60bp economic hurdle unchanged) | "
         "execution = real USDC -> PT -> USDC Pendle Convert; "
         f"cache TTL {settings.quote_cache_ttl_minutes}m, max 5 refreshes per run."
     )

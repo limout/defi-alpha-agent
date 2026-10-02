@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     alpha_min_net_return: float = 0.0010
     alpha_min_price_z: float = 2.5
     alpha_min_apy_z: float = 1.5
+    # Diagnostic floor so 2.5σ on a sub-10bp book is not treated as a setup.
+    # Does not replace the 50%-retracement / 20bp-cost / 10bp-net (60bp) hurdle.
+    alpha_min_price_distance: float = 0.0010
     alpha_min_days_to_expiry: float = 21.0
     alpha_max_days_to_expiry: float = 730.0
     quote_entry_max_impact: float = 0.0030

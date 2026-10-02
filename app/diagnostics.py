@@ -62,8 +62,8 @@ def build_states(markets, histories: dict[str, list[Snapshot]]) -> list[MarketSt
             z = 0 if sd == 0 else (latest.implied_apy - mean(base)) / sd
         prices = [x.pt_price_asset for x in h[-288:] if x.pt_price_asset is not None and x.pt_price_asset > 0 and x.price_basis == "ACCOUNTING_ASSET"]
         dist = None
-        if latest and latest.pt_price_asset and latest.price_basis == "ACCOUNTING_ASSET" and prices:
-            dist = median(prices) / latest.pt_price_asset - 1
+        if latest and latest.pt_price_asset and latest.price_basis == "ACCOUNTING_ASSET" and len(prices) >= 2:
+            dist = median(prices[:-1]) / latest.pt_price_asset - 1
         state = "WARMUP"
         if len(h) >= 24:
             state = "NEUTRAL"
